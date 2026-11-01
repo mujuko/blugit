@@ -3,6 +3,7 @@ import os
 import sys
 from pathlib import Path
 
+from .address import clone_url, local_address
 from .bluetooth import SERVICE, open_bluetooth
 from .wire import CHUNK, Kind, Peer
 
@@ -84,7 +85,7 @@ async def serve_git(channel, repository: Path):
             await process.wait()
 
 
-async def host(repository: Path):
+async def host(repository: Path, address: str | None = None):
     async def handle(request):
         try:
             async with request.accept() as channel:
@@ -96,7 +97,24 @@ async def host(repository: Path):
     async with open_bluetooth() as bluetooth:
         async with bluetooth.serve(SERVICE, name="blugit prototype") as service:
             print(f"Serving {repository} (RFCOMM channel {service.channel})", flush=True)
-            print("On the guest: blugit devices", flush=True)
+            try:
+                address = address or await local_address()
+                url = clone_url(address)
+                direct = clone_url(address, service.channel)
+                print(f"Bluetooth address: {address}", flush=True)
+                print(
+                    f"On the guest: git -c init.defaultBranch=main clone {url} demo-work",
+                    flush=True,
+                )
+                print(f"Direct channel URL (skip service lookup): {direct}", flush=True)
+            except Exception as exc:
+                print(
+                    f"Cannot read local Bluetooth address: {exc}. "
+                    "Use 'blugit address' to diagnose, "
+                    "or restart with --address AA-BB-CC-DD-EE-FF.",
+                    file=sys.stderr,
+                    flush=True,
+                )
             async with asyncio.TaskGroup() as group:
                 async for request in service.connection_requests():
                     group.create_task(handle(request))

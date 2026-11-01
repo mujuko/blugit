@@ -4,24 +4,32 @@ import os
 import re
 import sys
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .bluetooth import connect
 from .wire import CHUNK, Kind, Peer
 
 
-def parse_address(url: str) -> str:
+def parse_url(url: str) -> tuple[str, int | None]:
     parsed = urlsplit(url)
     address = parsed.netloc.replace("-", ":")
     if (
         parsed.scheme != "blugit"
         or not re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", address)
         or parsed.path not in ("", "/")
-        or parsed.query
         or parsed.fragment
     ):
         raise ValueError("expected blugit://AA-BB-CC-DD-EE-FF (one repo per host)")
-    return address.upper()
+    channel = None
+    if parsed.query:
+        query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+        if set(query) != {"channel"} or len(query["channel"]) != 1:
+            raise ValueError("only one optional ?channel=1..30 is supported")
+        value = query["channel"][0]
+        if not re.fullmatch(r"[0-9]{1,2}", value) or not 1 <= int(value) <= 30:
+            raise ValueError("RFCOMM channel must be between 1 and 30")
+        channel = int(value)
+    return address.upper(), channel
 
 
 def binary_stdio():
@@ -32,8 +40,8 @@ def binary_stdio():
             msvcrt.setmode(stream.fileno(), os.O_BINARY)
 
 
-async def transfer(address: str, service: bytes) -> int:
-    async with connect(address) as channel:
+async def transfer(address: str, service: bytes, channel_number: int | None = None) -> int:
+    async with connect(address, channel_number) as channel:
         peer = Peer(channel)
         await peer.send(Kind.REQUEST, service)
         async with asyncio.timeout(15):
@@ -107,7 +115,7 @@ def main():
     try:
         if len(sys.argv) not in (2, 3):
             raise ValueError("git-remote-blugit is invoked by Git")
-        address = parse_address(sys.argv[-1])
+        address, channel = parse_url(sys.argv[-1])
         # Read control lines without buffering bytes needed by the later binary relay.
         while line := sys.stdin.buffer.raw.readline(1024):
             command = line.rstrip(b"\n")
@@ -115,7 +123,7 @@ def main():
                 sys.stdout.buffer.write(b"connect\n\n")
                 sys.stdout.buffer.flush()
             elif command in (b"connect git-upload-pack", b"connect git-receive-pack"):
-                return asyncio.run(transfer(address, command.split(b" ", 1)[1]))
+                return asyncio.run(transfer(address, command.split(b" ", 1)[1], channel))
             elif not command:
                 return 0
             else:

@@ -4,7 +4,7 @@ import subprocess
 import pytest
 from loopback_helper import StreamChannel
 
-from blugit.helper import parse_address
+from blugit.helper import parse_url
 from blugit.host import serve_git
 from blugit.wire import HEADER, MAX_FRAME, Kind, Peer
 
@@ -17,7 +17,7 @@ from blugit.wire import HEADER, MAX_FRAME, Kind, Peer
     ],
 )
 def test_address(url):
-    assert parse_address(url) == "AA:BB:CC:DD:EE:FF"
+    assert parse_url(url) == ("AA:BB:CC:DD:EE:FF", None)
 
 
 @pytest.mark.parametrize(
@@ -32,7 +32,7 @@ def test_address(url):
 )
 def test_invalid_address(url):
     with pytest.raises(ValueError):
-        parse_address(url)
+        parse_url(url)
 
 
 def test_disconnect_cleans_up_git(tmp_path):

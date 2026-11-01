@@ -25,7 +25,7 @@ class StreamChannel:
 
 
 @asynccontextmanager
-async def connect(_address):
+async def connect(_address, _channel=None):
     reader, writer = await asyncio.open_connection("127.0.0.1", int(os.environ["BLUGIT_TEST_PORT"]))
     try:
         yield StreamChannel(reader, writer)

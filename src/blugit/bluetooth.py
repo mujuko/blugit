@@ -28,11 +28,16 @@ async def open_bluetooth():
 
 
 @asynccontextmanager
-async def connect(address: str):
+async def connect(address: str, channel_number: int | None = None):
     async with open_bluetooth() as bluetooth:
         device = aio_rfcomm.RfcommDeviceInfo(address)
         # Bound discovery/connection, but allow long transfers on slow Bluetooth links.
         async with AsyncExitStack() as stack:
             async with asyncio.timeout(30):
-                channel = await stack.enter_async_context(bluetooth.open_service(device, SERVICE))
+                connection = (
+                    bluetooth.open_service(device, SERVICE)
+                    if channel_number is None
+                    else bluetooth.open_channel(device, channel_number)
+                )
+                channel = await stack.enter_async_context(connection)
             yield channel

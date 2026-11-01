@@ -5,8 +5,10 @@ Mac / Windows のホスト・ゲスト間で、Bluetooth Classic (RFCOMM) 経由
 実行時に既存 LAN・Wi-Fi・インターネットは使いません。
 
 ホストは **1 つの bare リポジトリ** を公開します。認証・チーム管理・端末の自動探索は
-実装していません。接続には OS でペアリングした端末の Bluetooth アドレスを指定します。
-アプリ独自の認証はありませんが、OS が求めるペアリングや Bluetooth 利用許可は必要です。
+実装していません。**ホストが表示する clone URL をゲストへ渡して接続**します。
+ペアリング済み一覧への登録を接続手順の前提にしません。
+アプリ独自の認証はありません。OS の Bluetooth 利用許可は必要で、接続時に OS が
+ペアリングを要求するかどうかは端末・ドライバー・セキュリティ設定に依存します。
 
 ## 準備（両方の端末）
 
@@ -37,7 +39,7 @@ macOS:
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-`blugit --help` が表示できることを確認し、OS の Bluetooth 設定で 2 台をペアリングします。
+`blugit --help` が表示できることと、両端末の Bluetooth が有効なことを確認します。
 macOS で Bluetooth 利用許可が表示されたら `blugit` に許可してください。
 セットアップ後はネットワークを切って動かせます。
 
@@ -53,6 +55,30 @@ blugit host ./demo.git
 
 `Serving ... (RFCOMM channel ...)` が出たら待ち受け中です。
 このターミナルは開いたままにします。終了は Ctrl+C です。
+続けてホスト自身のアドレスと、ゲストで実行するコマンドが表示されます。
+
+```text
+Bluetooth address: AA:BB:CC:DD:EE:FF
+On the guest: git -c init.defaultBranch=main clone blugit://AA-BB-CC-DD-EE-FF demo-work
+Direct channel URL (skip service lookup): blugit://AA-BB-CC-DD-EE-FF?channel=7
+```
+
+この `On the guest:` のコマンドをゲストへ渡してください。`devices` にホストが出なくても
+アドレスを入力できます。ホストでアドレスだけ確認したい場合は、別ターミナルで実行します。
+
+```sh
+blugit address
+```
+
+Windows は既定の Bluetooth アダプター、macOS は `system_profiler` のコントローラー情報から
+ローカルアドレスを取得します。Wi-Fi や Ethernet の MAC アドレスとは異なります。
+自動取得に失敗する場合は、OS で確認した Bluetooth アドレスを表示用に指定できます。
+`--address` は利用アダプターを切り替えるオプションではありません。
+
+```sh
+blugit host ./demo.git --address AA-BB-CC-DD-EE-FF
+```
+
 ホストが指定したリポジトリだけを読み書きし、ゲストはパスや実行コマンドを指定できません。
 
 ホスト自身も作業する場合は、別ターミナルで `git clone ./demo.git host-work` し、
@@ -60,14 +86,7 @@ blugit host ./demo.git
 
 ## ゲスト
 
-ペアリング済み端末の名前、アドレス、clone URL を表示します。
-これは OS が知っている端末の一覧で、blugit が動作中であることまでは確認しません。
-
-```sh
-blugit devices
-```
-
-ホストの行にある URL を使います。以下のアドレスは実際のものに置き換えます。
+ホストが表示したコマンドを実行します。以下のアドレスは実際のものに置き換えます。
 URL は `blugit://AA-BB-CC-DD-EE-FF` 形式で、リポジトリ名は付けません。
 
 ```sh
@@ -77,6 +96,22 @@ cd demo-work
 
 空のリポジトリでは Git の初期ブランチ設定を使うため、上のコマンドでは `main` を明示しています。
 初回の空リポジトリ警告は正常です。
+
+サービスが見つからない場合は、ホストの `Direct channel URL` を使うと、
+SDP のサービス検索を省いて表示されたチャネルへ直接接続できます。
+URL は引用符で囲み、数字も実際に表示されたものに置き換えてください。
+
+```sh
+git -c init.defaultBranch=main clone 'blugit://AA-BB-CC-DD-EE-FF?channel=7' demo-work
+```
+
+直接チャネルを指定した場合、ホスト再起動後に番号が変わったら既存の作業コピーでも
+`git remote set-url origin '新しいDirect channel URL'` が必要です。
+チャネルなしの URL は毎回サービス UUID から番号を検索します。
+
+`blugit devices` は補助コマンドです。表示するのは **ペアリング済み端末だけ**で、
+近くの PC を探索するものではありません。ホストが表示されないことは、接続できないことを
+意味しません。ホスト自身が表示する URL を使ってください。
 
 ファイルを作ってコミットしたら push できます。Git の名前とメールアドレスは通常どおり
 `git config user.name` / `git config user.email` で設定しておきます。
@@ -98,10 +133,10 @@ git push
 
 ## 実機での確認
 
-1. 依存関係のセットアップと Bluetooth ペアリングを済ませる。
+1. 依存関係のセットアップを済ませ、両端末の Bluetooth を有効にする。
 2. 両端末の Wi-Fi と Ethernet を切り、Bluetooth は有効にしておく。
 3. ホストで上記の `blugit host` を起動する。
-4. ゲストで clone → ファイルをコミット → push する。
+4. ホストが表示した URL をゲストへ渡し、clone → ファイルをコミット → push する。
 5. ホストの別ターミナルで `git --git-dir=demo.git log --oneline --all` を確認する。
 6. ホストで `git clone ./demo.git host-work` し、別のファイルをコミットして push する。
 7. ゲストで `git pull --ff-only` し、そのファイルが届くことを確認する。
@@ -136,8 +171,11 @@ Bluetooth は [aio-rfcomm 1.1.0](https://github.com/dlech/aio-rfcomm) に委譲�
   または `.venv/bin`（Mac）が入っているか確認してください。`uv run git clone ...` でも使えます。
 - `Bluetooth unavailable: NO_ADAPTER` / `SWITCHED_OFF`: OS のアダプター状態とスイッチを確認します。
 - `NOT_ALLOWED`: OS の Bluetooth 利用許可を確認し、コマンドを起動し直します。
-- サービスが見つからない / 接続タイムアウト: ホストが起動しているか、アドレスとペアリング、
-  距離を確認します。ホスト再起動後は Bluetooth 接続やサービスキャッシュの更新が必要な場合があります。
+- サービスが見つからない / 接続タイムアウト: ホストが起動しているか、アドレス・チャネル番号・
+  距離を確認します。サービス検索だけが失敗する場合は、ホストが表示する Direct channel URL を
+  試してください。ホスト再起動後は Bluetooth 接続やサービスキャッシュの更新が必要な場合があります。
+  OS が接続・ペアリングの許可を表示した場合は端末側で確認します。ホストが応答しない場合は
+  OS 側の Bluetooth 接続許可・検出可能設定も確認してください。
 - Mac でホストの停止・起動を繰り返した後に接続できなくなった場合は、Bluetooth をオフ・オンして
   ホストを再起動します。依存ライブラリに記載されたチャネル再利用の制約があります。
   詳細は [aio-rfcomm のプラットフォーム別制約](https://dlech.github.io/aio-rfcomm/platforms/) を参照してください。
@@ -156,5 +194,10 @@ uv run ruff format --check .
 空の clone、バイナリデータの push / clone、pull、更新不要の pull、non-fast-forward 拒否、
 rebase 後の push、オブジェクト整合性、Git のエラー伝達、切断時の終了処理を確認します。
 
-実装時の Windows 環境では Bluetooth アダプターが OS 上で `Error`、ライブラリからは
-`NO_ADAPTER` だったため、無線での実機検証は行えていません。上の実機手順で確認が必要です。
+初回実装時の Windows 環境ではアダプターが `Error` / `NO_ADAPTER` でした。
+その後追加された USB アダプターでは、Windows のローカルアドレス取得を確認できています。
+端末間の無線での clone / push / pull は未検証で、上の実機手順で確認が必要です。
+
+Windows の RFCOMM 自体は事前ペアリングなしの接続をサポートしますが、
+Mac / Windows 間のすべての構成で無条件に接続できることは確認していません。
+参考: [Microsoft Bluetooth Developer FAQ](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/bluetooth-dev-faq#do-i-have-to-pair-bluetooth-devices-before-using-them)。
