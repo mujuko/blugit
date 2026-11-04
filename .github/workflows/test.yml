@@ -6,14 +6,35 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libbluetooth-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --features test-transport
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.8.22"
-      - run: uv sync --locked --python 3.13
-      - run: uv run pytest -q
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      - run: uv sync --locked --project reference/python --python 3.13
+      - run: uv run --project reference/python pytest -q reference/python/tests
+      - name: Rust guest against Python host
+        shell: pwsh
+        run: |
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          $env:BLUGIT_RUST_HELPER = (Join-Path $PWD "target/debug/git-remote-blugit$extension")
+          uv run --project reference/python pytest -q reference/python/tests/test_git.py
+      - name: Python guest against Rust host
+        shell: pwsh
+        run: |
+          $extension = if ($IsWindows) { '.exe' } else { '' }
+          $env:BLUGIT_RUST_HOST = (Join-Path $PWD "target/debug/blugit$extension")
+          uv run --project reference/python pytest -q reference/python/tests/test_git.py
+      - run: uv run --project reference/python ruff check reference/python
+      - run: uv run --project reference/python ruff format --check reference/python

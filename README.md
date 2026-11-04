@@ -1,120 +1,87 @@
-# blugit prototype
+# blugit prototype — Rust
 
-Mac / Windows のホスト・ゲスト間で、Bluetooth Classic (RFCOMM) 経由の
-`git clone` / `git push` / `git pull` を試すための最小プロトタイプです。
-実行時に既存 LAN・Wi-Fi・インターネットは使いません。
+Windows / macOS / Linux の PC 間で、Bluetooth Classic (RFCOMM) を使い、
+オフラインで通常の `git clone` / `git push` / `git pull` を行うプロトタイプです。
+ホストは 1 つの bare リポジトリを公開します。認証・チーム管理はありません。
 
-ホストは **1 つの bare リポジトリ** を公開します。認証・チーム管理・端末の自動探索は
-実装していません。**ホストが表示する clone URL をゲストへ渡して接続**します。
-ペアリング済み一覧への登録を接続手順の前提にしません。
-アプリ独自の認証はありません。OS の Bluetooth 利用許可は必要で、接続時に OS が
-ペアリングを要求するかどうかは端末・ドライバー・セキュリティ設定に依存します。
+Python 版で実機転送が成功した構成を Rust に移植しています。サービス UUID と通信フレームは
+同じで、Python 版と相互接続できます。旧実装は [reference/python](reference/python) に保存しました。
+この移植には、先に検討した SSH・公開鍵認証はまだ含めていません。
 
-## 準備（両方の端末）
+## 準備（両端末）
 
-必要なものは Git、Python 3.11 以上、[uv](https://docs.astral.sh/uv/)、
-Bluetooth Classic / RFCOMM 対応アダプターです。
-まずオンラインのうちに、このソースと依存パッケージを両端末へ用意します。
+Git と Rust の stable ツールチェーンが必要です。Windows は Rust の MSVC ツールチェーンと
+Visual Studio C++ Build Tools、Mac は Xcode Command Line Tools が必要です。
+Bluetooth Classic / RFCOMM 対応アダプターを使います（BLE 専用アダプターは不可）。
+
+Linux（Ubuntu / Debian）はビルド用パッケージも入れます。
+
+```sh
+sudo apt-get install build-essential pkg-config libdbus-1-dev libbluetooth-dev bluez
+```
+
+オンラインのうちにソースと依存関係を用意し、**両端末で**インストールします。
 
 ```sh
 git clone --branch prototype https://github.com/mujuko/blugit.git
 cd blugit
-uv sync --locked
+cargo install --path . --locked
+blugit --help
 ```
 
-このブランチがまだリモートにない場合は、ローカルのソース一式をコピーしてください。
-オフラインにする前に `uv sync --locked` を済ませておきます。
-
-続いて、同じターミナルの PATH に CLI と Git Remote Helper を追加します。
-
-Windows PowerShell:
+`blugit` と `git-remote-blugit` の 2 つが Cargo の bin ディレクトリに入ります。
+既存の Python 版を使っていた場合は、その `.venv` より先に Cargo の bin を PATH に入れてください。
+PowerShell では次のように設定できます。
 
 ```powershell
-$env:PATH = "$PWD\.venv\Scripts;$env:PATH"
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+Get-Command blugit,git-remote-blugit
 ```
 
-macOS:
+Mac / Linux:
 
 ```sh
-export PATH="$PWD/.venv/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$PATH"
+command -v blugit git-remote-blugit
 ```
 
-`blugit --help` が表示できることと、両端末の Bluetooth が有効なことを確認します。
-macOS で Bluetooth 利用許可が表示されたら `blugit` に許可してください。
-セットアップ後はネットワークを切って動かせます。
+セットアップ後の実行に Python・uv・LAN・インターネットは不要です。
+両端末の Bluetooth は有効にします。OS での事前ペアリングを接続手順の前提にはしませんが、
+OS が表示する Bluetooth 利用許可や接続確認には対応してください。
 
 ## ホスト
-
-好きな保存先で bare リポジトリを作成して公開します。
-Mac / Windows どちらも同じコマンドです。
 
 ```sh
 git init --bare --initial-branch=main demo.git
 blugit host ./demo.git
 ```
 
-`Serving ... (RFCOMM channel ...)` が出たら待ち受け中です。
-このターミナルは開いたままにします。終了は Ctrl+C です。
-続けてホスト自身のアドレスと、ゲストで実行するコマンドが表示されます。
+待ち受けが始まると、自分の Bluetooth アドレスとゲスト用コマンドを表示します。
 
 ```text
+Serving ... (RFCOMM channel 7)
 Bluetooth address: AA:BB:CC:DD:EE:FF
 On the guest: git -c init.defaultBranch=main clone blugit://AA-BB-CC-DD-EE-FF demo-work
 Direct channel URL (skip service lookup): blugit://AA-BB-CC-DD-EE-FF?channel=7
 ```
 
-この `On the guest:` のコマンドをゲストへ渡してください。`devices` にホストが出なくても
-アドレスを入力できます。ホストでアドレスだけ確認したい場合は、別ターミナルで実行します。
-
-```sh
-blugit address
-```
-
-Windows は既定の Bluetooth アダプター、macOS は `system_profiler` のコントローラー情報から
-ローカルアドレスを取得します。Wi-Fi や Ethernet の MAC アドレスとは異なります。
-自動取得に失敗する場合は、OS で確認した Bluetooth アドレスを表示用に指定できます。
-`--address` は利用アダプターを切り替えるオプションではありません。
-
-```sh
-blugit host ./demo.git --address AA-BB-CC-DD-EE-FF
-```
-
-ホストが指定したリポジトリだけを読み書きし、ゲストはパスや実行コマンドを指定できません。
-
-ホスト自身も作業する場合は、別ターミナルで `git clone ./demo.git host-work` し、
-その作業コピーから通常どおりローカルの bare リポジトリへ push します。
+ホストはこのまま起動しておきます。終了は Ctrl+C。
+アドレスだけ確認するには `blugit address` を使います。
+表示用アドレスを手動指定する `blugit host ./demo.git --address AA-BB-CC-DD-EE-FF` も使えます。
+このオプションはアダプターを切り替えません。
 
 ## ゲスト
 
-ホストが表示したコマンドを実行します。以下のアドレスは実際のものに置き換えます。
-URL は `blugit://AA-BB-CC-DD-EE-FF` 形式で、リポジトリ名は付けません。
+ホストの `On the guest:` のコマンドをコピーして実行します。
+以下のアドレスを実際のものに置き換えてください。
 
 ```sh
 git -c init.defaultBranch=main clone blugit://AA-BB-CC-DD-EE-FF demo-work
 cd demo-work
 ```
 
-空のリポジトリでは Git の初期ブランチ設定を使うため、上のコマンドでは `main` を明示しています。
-初回の空リポジトリ警告は正常です。
-
-サービスが見つからない場合は、ホストの `Direct channel URL` を使うと、
-SDP のサービス検索を省いて表示されたチャネルへ直接接続できます。
-URL は引用符で囲み、数字も実際に表示されたものに置き換えてください。
-
-```sh
-git -c init.defaultBranch=main clone 'blugit://AA-BB-CC-DD-EE-FF?channel=7' demo-work
-```
-
-直接チャネルを指定した場合、ホスト再起動後に番号が変わったら既存の作業コピーでも
-`git remote set-url origin '新しいDirect channel URL'` が必要です。
-チャネルなしの URL は毎回サービス UUID から番号を検索します。
-
-`blugit devices` は補助コマンドです。表示するのは **ペアリング済み端末だけ**で、
-近くの PC を探索するものではありません。ホストが表示されないことは、接続できないことを
-意味しません。ホスト自身が表示する URL を使ってください。
-
-ファイルを作ってコミットしたら push できます。Git の名前とメールアドレスは通常どおり
-`git config user.name` / `git config user.email` で設定しておきます。
+空のリポジトリの場合は警告が出ますが正常です。初期ブランチは `main` に揃えています。
+Git の `user.name` / `user.email` を設定し、ファイルを作ってコミットします。
 
 ```sh
 git add .
@@ -122,82 +89,90 @@ git commit -m "First Bluetooth commit"
 git push -u origin main
 ```
 
-別の作業コピーやホストから更新を push した後は、いつものコマンドで取得します。
+以降は通常のコマンドを使えます。
 
 ```sh
 git pull --ff-only
 git push
 ```
 
-競合・non-fast-forward の扱いは通常の Git と同じです。
-
-## 実機での確認
-
-1. 依存関係のセットアップを済ませ、両端末の Bluetooth を有効にする。
-2. 両端末の Wi-Fi と Ethernet を切り、Bluetooth は有効にしておく。
-3. ホストで上記の `blugit host` を起動する。
-4. ホストが表示した URL をゲストへ渡し、clone → ファイルをコミット → push する。
-5. ホストの別ターミナルで `git --git-dir=demo.git log --oneline --all` を確認する。
-6. ホストで `git clone ./demo.git host-work` し、別のファイルをコミットして push する。
-7. ゲストで `git pull --ff-only` し、そのファイルが届くことを確認する。
-8. ホストとゲストを入れ替え、別の bare リポジトリでも同じ操作を行う。
-
-## 仕組みと範囲
-
-```text
-guest Git <-> git-remote-blugit <-> Bluetooth RFCOMM <-> blugit host
-                                                        |
-                                            git upload-pack / receive-pack
-                                                        |
-                                                 bare repository
-```
-
-[Git Remote Helper の `connect`](https://git.github.io/htmldocs/gitremote-helpers.html)
-で Git 本来の双方向通信をつなぎ、オブジェクト転送・差分・ref 更新は Git に任せます。
-Bluetooth は [aio-rfcomm 1.1.0](https://github.com/dlech/aio-rfcomm) に委譲します。
-独自フレームはサービス選択、データ、stdin 終了、stderr、終了コード、受信完了確認だけです。
-サービス UUID は `2d508ec7-69a4-47f2-a90c-b54df08c3cf5`。SDP でチャネルを引くので、
-ホスト再起動時に RFCOMM チャネルが変わっても URL は同じです。
-
-- 同じホストへの Git 操作は順番に実行してください。
-- 認証・認可・アプリ独自の暗号化・再接続・転送再開はありません。
-- BLE 専用アダプターには対応しません。大きな履歴は Bluetooth の速度に制限されます。
-- 切断時は進行中の Git プロセスを終了します。再接続後に Git コマンドを再実行してください。
-- Mac / Windows 対応ライブラリを使っていますが、このプロトタイプの端末間実機通信は未検証です。
-
-## 困ったとき
-
-- `git: 'remote-blugit' is not a git command`: ゲストの PATH に `.venv/Scripts`（Windows）
-  または `.venv/bin`（Mac）が入っているか確認してください。`uv run git clone ...` でも使えます。
-- `Bluetooth unavailable: NO_ADAPTER` / `SWITCHED_OFF`: OS のアダプター状態とスイッチを確認します。
-- `NOT_ALLOWED`: OS の Bluetooth 利用許可を確認し、コマンドを起動し直します。
-- サービスが見つからない / 接続タイムアウト: ホストが起動しているか、アドレス・チャネル番号・
-  距離を確認します。サービス検索だけが失敗する場合は、ホストが表示する Direct channel URL を
-  試してください。ホスト再起動後は Bluetooth 接続やサービスキャッシュの更新が必要な場合があります。
-  OS が接続・ペアリングの許可を表示した場合は端末側で確認します。ホストが応答しない場合は
-  OS 側の Bluetooth 接続許可・検出可能設定も確認してください。
-- Mac でホストの停止・起動を繰り返した後に接続できなくなった場合は、Bluetooth をオフ・オンして
-  ホストを再起動します。依存ライブラリに記載されたチャネル再利用の制約があります。
-  詳細は [aio-rfcomm のプラットフォーム別制約](https://dlech.github.io/aio-rfcomm/platforms/) を参照してください。
-
-## 開発・検証
+サービス検索で接続できない場合は、ホストの **Direct channel URL** を使えます。
+URL を引用符で囲み、チャネル番号も実際に表示されたものに置き換えます。
 
 ```sh
-uv sync --locked
-uv run pytest -q
-uv run ruff check .
-uv run ruff format --check .
+git -c init.defaultBranch=main clone 'blugit://AA-BB-CC-DD-EE-FF?channel=7' demo-work
 ```
 
-テストは実際の Git CLI・Remote Helper・ホストの Git プロセスを使用し、無線部分だけを
-テスト用ループバックストリームに置き換えます。配布する CLI に TCP モードはありません。
-空の clone、バイナリデータの push / clone、pull、更新不要の pull、non-fast-forward 拒否、
-rebase 後の push、オブジェクト整合性、Git のエラー伝達、切断時の終了処理を確認します。
+直接チャネルを指定した場合、ホスト再起動で番号が変わったら、既存の作業コピーでも
+`git remote set-url origin '新しいDirect channel URL'` が必要です。
+チャネルなしの URL はサービス UUID で接続先チャネルを検索します。
 
-初回実装時の Windows 環境ではアダプターが `Error` / `NO_ADAPTER` でした。
-その後追加された USB アダプターでは、Windows のローカルアドレス取得を確認できています。
-端末間の無線での clone / push / pull は未検証で、上の実機手順で確認が必要です。
+`blugit devices` は **ペアリング済み端末の一覧**です。近くの PC を探索するコマンドではありません。
+ホストが一覧に出なくても、ホスト自身が表示する URL で接続先を指定できます。
 
-Windows の RFCOMM 自体は事前ペアリングなしの接続をサポートしますが、
-Mac / Windows 間のすべての構成で無条件に接続できることは確認していません。
-参考: [Microsoft Bluetooth Developer FAQ](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/bluetooth-dev-faq#do-i-have-to-pair-bluetooth-devices-before-using-them)。
+ホスト自身が編集する場合は、別ターミナルで `git clone ./demo.git host-work` して作業し、
+ローカルの bare リポジトリへ push してください。
+
+## OS ごとの構成
+
+| OS | Bluetooth の実装 | 補足 |
+|---|---|---|
+| Windows | Rust + Winsock RFCOMM / SDP、Win32 のアドレス取得 | SDP での UUID 指定とチャネル直接指定の両方に対応 |
+| macOS | Rust + 小さな Objective-C / IOBluetooth ブリッジ | ヘルパーのメインループと権限を `.app` 内に分離 |
+| Linux | Rust / BlueZ（bluer）+ SDP 検索用の小さな C ブリッジ | bluetoothd と、その D-Bus へのアクセス権限が必要 |
+
+Mac は初回利用時に `~/Library/Caches/blugit/` にヘルパー `.app` を生成します。
+Bluetooth 利用許可は `blugit` に与えてください。IOBluetooth のイベントループと RFCOMM の
+読み書きはヘルパーで処理し、Rust とはローカルの Unix socket で通信します。IP ポートは開きません。
+ビルドには Objective-C コンパイラーを使いますが、実行時の Python 依存はありません。
+
+Mac でホストの停止・起動を繰り返すと、OS に古いチャネルが残る場合があります。
+接続できなくなった場合は Bluetooth をオフ・オンし、ホストを起動し直してください。
+同じホストへの Git 操作は順番に実行します。
+
+Linux は BlueZ の既定アダプターを使います。OS の Bluetooth 設定などで有効にしてから起動します。
+アプリは OS の認証・認可ポリシーを変更しません。
+
+## 実機確認
+
+1. 両端末でインストールし、Bluetooth を有効にする。
+2. Wi-Fi / Ethernet を切ってホストを起動する。
+3. 表示された URL でゲストが clone → コミット → push する。
+4. ホストで `git --git-dir=demo.git log --oneline --all` を確認する。
+5. ホストで `git clone ./demo.git host-work` し、別ファイルをコミットして push する。
+6. ゲストで `git pull --ff-only` してファイルを確認する。
+7. ホストとゲストを入れ替えて確認する。
+
+Python 版の clone / push / pull は利用者の実機で成功しています。
+Rust 版は Windows 上で Git の往復・Python 版との双方向互換性をテストしています。
+Mac / Linux のネイティブビルドと無線相互接続は各 OS での確認が必要です。
+CI は Windows / macOS / Linux のビルドと無線部分を置き換えたテストを実行する構成です。
+
+## 開発・テスト
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --features test-transport
+cargo build --release --locked
+```
+
+`test-transport` はテスト専用のループバック通信を有効にする機能です。
+実際の Git CLI と Remote Helper で、空の clone、バイナリ転送、push / pull、
+non-fast-forward 拒否、rebase 後の push、オブジェクト整合性、Git エラー伝達を検証します。
+**配布・実機利用のビルドには `test-transport` を付けません。**
+
+Python 版との互換性テスト（開発時のみ uv を使用）:
+
+```sh
+uv sync --project reference/python --locked
+uv run --project reference/python pytest -q reference/python/tests
+```
+
+さらに `BLUGIT_RUST_HELPER` に Rust の `git-remote-blugit` の絶対パスを指定すると
+「Rust ゲスト → Python ホスト」、`BLUGIT_RUST_HOST` に Rust の `blugit` の絶対パスを
+指定すると「Python ゲスト → Rust ホスト」を、同じ Python の Git 往復テストで確認できます。
+対象は `reference/python/tests/test_git.py` です。Rust 側は先に
+`cargo build --features test-transport --bins` でテスト用にビルドしてください。
+
+通信仕様は [docs/protocol.md](docs/protocol.md) を参照してください。

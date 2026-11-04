@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -67,10 +68,20 @@ def host(tmp_path):
             errors.append(exc)
             ready.set()
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    assert ready.wait(10), "test server did not start"
-    assert not errors
+    external = None
+    if rust_host := os.environ.get("BLUGIT_RUST_HOST"):
+        external = subprocess.Popen(
+            [rust_host, "__test-host", str(repository)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        state["port"] = int(external.stdout.readline().strip().rsplit(":", 1)[1])
+    else:
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        assert ready.wait(10), "test server did not start"
+        assert not errors
 
     # Git for Windows understands executable shell helpers, as does Git on macOS.
     helper_dir = tmp_path / "helpers"
@@ -84,10 +95,14 @@ def host(tmp_path):
         newline="\n",
     )
     launcher.chmod(0o755)
+    if rust_helper := os.environ.get("BLUGIT_RUST_HELPER"):
+        launcher.unlink()
+        shutil.copy2(rust_helper, helper_dir / Path(rust_helper).name)
     env = {
         **os.environ,
         "PATH": str(helper_dir) + os.pathsep + os.environ["PATH"],
         "BLUGIT_TEST_PORT": str(state["port"]),
+        "BLUGIT_TEST_ADDR": f"127.0.0.1:{state['port']}",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_AUTHOR_NAME": "Prototype Test",
@@ -99,9 +114,13 @@ def host(tmp_path):
     try:
         yield repository, env
     finally:
-        state["loop"].call_soon_threadsafe(state["stop"].set)
-        thread.join(10)
-        assert not thread.is_alive(), "Git session failed to clean up"
+        if external is not None:
+            external.terminate()
+            external.wait(timeout=10)
+        else:
+            state["loop"].call_soon_threadsafe(state["stop"].set)
+            thread.join(10)
+            assert not thread.is_alive(), "Git session failed to clean up"
         assert not errors, errors
 
 
