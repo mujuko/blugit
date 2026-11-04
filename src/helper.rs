@@ -3,7 +3,7 @@ use crate::{
     platform,
     wire::{self, CHUNK, Kind},
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     io::{Read, Write},
     time::Duration,
@@ -11,6 +11,10 @@ use std::{
 
 pub async fn run() -> Result<u8> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--version"] {
+        println!("git-remote-blugit {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
     ensure!(
         (1..=2).contains(&args.len()),
         "git-remote-blugit is invoked by Git"
@@ -53,10 +57,16 @@ pub async fn run() -> Result<u8> {
 }
 
 async fn transfer(endpoint: &Endpoint, service: &[u8]) -> Result<u8> {
-    let mut stream = platform::connect(endpoint).await?;
-    wire::send(&mut stream, Kind::Request, service).await?;
-    let (kind, data) =
-        tokio::time::timeout(Duration::from_secs(15), wire::receive(&mut stream)).await??;
+    let mut stream = platform::connect(endpoint)
+        .await
+        .context("connect Bluetooth transport")?;
+    wire::send(&mut stream, Kind::Request, service)
+        .await
+        .context("send initial REQUEST to host")?;
+    let (kind, data) = tokio::time::timeout(Duration::from_secs(15), wire::receive(&mut stream))
+        .await
+        .context("timed out waiting for READY")?
+        .context("receive READY from host")?;
     if kind == Kind::Error {
         bail!("{}", String::from_utf8_lossy(&data));
     }
@@ -108,7 +118,9 @@ async fn transfer(endpoint: &Endpoint, service: &[u8]) -> Result<u8> {
     };
     let incoming = async move {
         loop {
-            let (kind, data) = wire::receive(&mut reader).await?;
+            let (kind, data) = wire::receive(&mut reader)
+                .await
+                .context("receive Git output/EXIT from host")?;
             match kind {
                 Kind::Data => {
                     let mut stdout = std::io::stdout().lock();

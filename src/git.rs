@@ -43,8 +43,10 @@ pub async fn validate_repository(path: &Path) -> Result<PathBuf> {
 pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
     let (mut reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(Mutex::new(writer));
-    let (kind, data) =
-        tokio::time::timeout(Duration::from_secs(15), wire::receive(&mut reader)).await??;
+    let (kind, data) = tokio::time::timeout(Duration::from_secs(15), wire::receive(&mut reader))
+        .await
+        .context("timed out waiting for initial REQUEST")?
+        .context("receive initial REQUEST before starting Git")?;
     let service = match (kind, data.as_slice()) {
         (Kind::Request, b"git-upload-pack") => "upload-pack",
         (Kind::Request, b"git-receive-pack") => "receive-pack",
@@ -65,11 +67,14 @@ pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn()?;
+        .spawn()
+        .with_context(|| format!("start git {service}"))?;
     let mut stdin = child.stdin.take().context("Git stdin")?;
     let stdout = child.stdout.take().context("Git stdout")?;
     let stderr = child.stderr.take().context("Git stderr")?;
-    wire::send(&mut *writer.lock().await, Kind::Ready, b"").await?;
+    wire::send(&mut *writer.lock().await, Kind::Ready, b"")
+        .await
+        .context("send READY to guest")?;
 
     async fn forward<R: AsyncRead + Unpin>(
         mut input: R,
@@ -90,7 +95,13 @@ pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
     let incoming = async move {
         let mut eof = false;
         loop {
-            let (kind, data) = wire::receive(&mut reader).await?;
+            let (kind, data) = wire::receive(&mut reader).await.with_context(|| {
+                if incoming_exited.load(std::sync::atomic::Ordering::Acquire) {
+                    format!("receive final ACK after git {service} exited")
+                } else {
+                    format!("receive guest DATA/EOF for git {service}")
+                }
+            })?;
             match kind {
                 Kind::Ack
                     if data.is_empty()
@@ -116,8 +127,16 @@ pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
     };
     let outgoing = async {
         tokio::try_join!(
-            forward(stdout, writer.clone(), Kind::Data),
-            forward(stderr, writer.clone(), Kind::Stderr)
+            async {
+                forward(stdout, writer.clone(), Kind::Data)
+                    .await
+                    .context("forward Git stdout to guest")
+            },
+            async {
+                forward(stderr, writer.clone(), Kind::Stderr)
+                    .await
+                    .context("forward Git stderr to guest")
+            }
         )?;
         let status = child.wait().await?;
         exited.store(true, std::sync::atomic::Ordering::Release);
@@ -126,7 +145,8 @@ pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
             Kind::Exit,
             status.code().unwrap_or(1).to_string().as_bytes(),
         )
-        .await?;
+        .await
+        .context("send EXIT to guest")?;
         Ok::<_, anyhow::Error>(())
     };
     tokio::pin!(incoming, outgoing);
@@ -143,4 +163,24 @@ pub async fn serve(stream: Connection, repository: &Path) -> Result<()> {
         }
     };
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disconnect_before_request_identifies_handshake_phase() {
+        let (host, guest) = tokio::io::duplex(16);
+        drop(guest);
+        let error = serve(Box::new(host), Path::new("."))
+            .await
+            .expect_err("guest disconnected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("receive initial REQUEST before starting Git"),
+            "{message}"
+        );
+        assert!(message.contains("read frame type"), "{message}");
+    }
 }

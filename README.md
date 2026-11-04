@@ -130,6 +130,20 @@ Mac でホストの停止・起動を繰り返すと、OS に古いチャネル�
 接続できなくなった場合は Bluetooth をオフ・オンし、ホストを起動し直してください。
 同じホストへの Git 操作は順番に実行します。
 
+Rust 版 `0.2.0` の Mac ブリッジには、データ待ちを切断と誤認する不具合がありました。
+Mac から Windows への push で両端に `unexpected end of file` が出る報告を受けて調査し、
+`dispatch_io_create` が `dup()` 元とも共有される `O_NONBLOCK` を設定するのに、
+受信側が `EAGAIN` / `EWOULDBLOCK` を EOF と同じ扱いにしていたことを確認しました。
+`0.2.1` では読み取り可能になるまで待ち、EOF・一時的なデータ待ち・実際の I/O エラーを区別します。
+この fd の動作は [Apple の API 仕様](https://developer.apple.com/documentation/dispatch/dispatch_io_create)
+にも記載されています。
+
+修正後のソースを Mac に反映し、`cargo install --path . --locked --force` で入れ直してから
+`git push` を再実行してください。`blugit --version` と `git-remote-blugit --version` が
+ともに `0.2.1` であることを確認します。ヘルパー `.app` は新しいバイナリから自動生成されます。
+OS の再起動は不要です。Windows も更新し、起動中のホストを停止・再起動すると、
+REQUEST 受信前・Git 転送中・最終 ACK 待ちのどこで切れたかをログで確認できます。
+
 Linux は BlueZ の既定アダプターを使います。OS の Bluetooth 設定などで有効にしてから起動します。
 アプリは OS の認証・認可ポリシーを変更しません。
 
@@ -161,6 +175,13 @@ cargo build --release --locked
 実際の Git CLI と Remote Helper で、空の clone、バイナリ転送、push / pull、
 non-fast-forward 拒否、rebase 後の push、オブジェクト整合性、Git エラー伝達を検証します。
 **配布・実機利用のビルドには `test-transport` を付けません。**
+
+Mac では実際の Dispatch I/O と Unix socket を使い、初回送信を遅延させる回帰テストも実行します。
+このテストは Bluetooth API を呼ばないため、Bluetooth 機器や利用許可がなくても実行できます。
+
+```sh
+cargo test --features test-transport dispatch_io_nonblocking_duplicate_waits_for_delayed_data
+```
 
 Python 版との互換性テスト（開発時のみ uv を使用）:
 

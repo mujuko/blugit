@@ -7,11 +7,15 @@ fn main() {
         return;
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        cc::Build::new()
+        let mut build = cc::Build::new();
+        build
             .file("native/macos.m")
             .flag("-fobjc-arc")
-            .flag("-fblocks")
-            .compile("blugit_macos");
+            .flag("-fblocks");
+        if std::env::var_os("CARGO_FEATURE_TEST_TRANSPORT").is_some() {
+            build.define("BLUGIT_TEST_TRANSPORT", None);
+        }
+        build.compile("blugit_macos");
         for framework in ["Foundation", "IOBluetooth", "CoreBluetooth"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }

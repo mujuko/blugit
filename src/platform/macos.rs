@@ -272,3 +272,53 @@ pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
         _directory: directory,
     }))
 }
+
+#[cfg(all(test, feature = "test-transport"))]
+mod tests {
+    use std::{
+        io::{self, Read, Write},
+        net::Shutdown,
+        os::{fd::AsRawFd, unix::net::UnixStream},
+        time::Duration,
+    };
+
+    unsafe extern "C" {
+        fn blugit_test_dispatch_read(fd: i32, buffer: *mut u8, size: usize) -> isize;
+    }
+
+    #[test]
+    fn dispatch_io_nonblocking_duplicate_waits_for_delayed_data() -> io::Result<()> {
+        let (reader, mut peer) = UnixStream::pair()?;
+        peer.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let expected: Vec<u8> = (0..4096).map(|index| index as u8).collect();
+        let payload = expected.clone();
+        let writer = std::thread::spawn(move || -> io::Result<()> {
+            let mut marker = [0];
+            peer.read_exact(&mut marker)?;
+            assert_eq!(marker, *b"!");
+            // The bridge is idle after Dispatch I/O has set O_NONBLOCK. This
+            // used to turn read()'s EAGAIN into an immediate Bluetooth close.
+            std::thread::sleep(Duration::from_millis(150));
+            for chunk in payload.chunks(257) {
+                peer.write_all(chunk)?;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            peer.shutdown(Shutdown::Write)
+        });
+        let mut received = vec![0; expected.len()];
+        // SAFETY: the Unix stream and output buffer remain valid throughout the
+        // synchronous native regression harness; no Bluetooth API is called.
+        let count = unsafe {
+            blugit_test_dispatch_read(reader.as_raw_fd(), received.as_mut_ptr(), received.len())
+        };
+        writer.join().expect("Unix socket test writer panicked")?;
+        assert_eq!(
+            count,
+            expected.len() as isize,
+            "native read: {}",
+            io::Error::last_os_error()
+        );
+        assert_eq!(received, expected);
+        Ok(())
+    }
+}

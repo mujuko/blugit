@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -18,6 +19,59 @@ static NSString * const ServiceUUID = @"2d508ec7-69a4-47f2-a90c-b54df08c3cf5";
 static NSMutableSet *LiveBridges;
 static BOOL Guest = NO;
 static BOOL ParentGone = NO;
+
+// dispatch_io_create can set O_NONBLOCK on its fd. dup() shares those file
+// status flags with the reader, so EAGAIN is "wait for data", never EOF.
+static ssize_t ReadWhenReady(int fd, void *buffer, size_t size) {
+    for (;;) {
+        ssize_t count = read(fd, buffer, size);
+        if (count >= 0) return count;
+        if (errno == EINTR) continue;
+        if (errno != EAGAIN && errno != EWOULDBLOCK) return -1;
+        struct pollfd wait = {.fd = fd, .events = POLLIN};
+        int ready;
+        do { ready = poll(&wait, 1, -1); } while (ready < 0 && errno == EINTR);
+        if (ready < 0) return -1;
+        if (wait.revents & POLLNVAL) { errno = EBADF; return -1; }
+    }
+}
+
+#ifdef BLUGIT_TEST_TRANSPORT
+// Exercise the real Dispatch I/O fd flag change without touching Bluetooth.
+// The Rust regression test waits for this marker, then delays its first write.
+ssize_t blugit_test_dispatch_read(int fd, void *buffer, size_t size) {
+    int outputFD = dup(fd);
+    if (outputFD < 0) return -1;
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    dispatch_io_t channel = dispatch_io_create(DISPATCH_IO_STREAM, outputFD, queue, ^(int error) { (void)error; close(outputFD); });
+    if (!channel) { close(outputFD); return -1; }
+    dispatch_semaphore_t marker = dispatch_semaphore_create(0);
+    __block int writeError = 0;
+    dispatch_data_t bytes = dispatch_data_create("!", 1, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    dispatch_io_write(channel, 0, bytes, queue, ^(bool done, dispatch_data_t remaining, int error) {
+        (void)remaining;
+        if (error) writeError = error;
+        if (done) dispatch_semaphore_signal(marker);
+    });
+    ssize_t total = 0;
+    if (dispatch_semaphore_wait(marker, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 || writeError) {
+        total = -1;
+    } else if (!(fcntl(fd, F_GETFL) & O_NONBLOCK)) {
+        // Do not silently pass if this OS did not exercise the actual bug.
+        errno = EINVAL;
+        total = -1;
+    } else {
+        while ((size_t)total < size) {
+            ssize_t count = ReadWhenReady(fd, (char *)buffer + total, size - (size_t)total);
+            if (count < 0) { total = -1; break; }
+            if (count == 0) break;
+            total += count;
+        }
+    }
+    dispatch_io_close(channel, DISPATCH_IO_STOP);
+    return total;
+}
+#endif
 
 static void MonitorParent(void) {
     // stdout is a bidirectional private Unix socket, not a terminal. Losing the
@@ -138,9 +192,15 @@ static CBCentralManager *WaitForBluetooth(void) {
             if (!bridge || bridge.closed) break;
             size_t mtu = bridge.mtu;
             NSMutableData *buffer = [NSMutableData dataWithLength:mtu];
-            ssize_t count = read(fd, buffer.mutableBytes, mtu);
-            if (count < 0 && errno == EINTR) continue;
-            if (count <= 0) { dispatch_async(dispatch_get_main_queue(), ^{ [weak finish]; }); break; }
+            ssize_t count = ReadWhenReady(fd, buffer.mutableBytes, mtu);
+            if (count <= 0) {
+                int error = count < 0 ? errno : 0;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (error) fprintf(stderr, "blugit Bluetooth: local stream read failed: %s\n", strerror(error));
+                    [weak finish];
+                });
+                break;
+            }
             buffer.length = (NSUInteger)count;
             dispatch_async(dispatch_get_main_queue(), ^{
                 Bridge *current = weak;
@@ -155,7 +215,15 @@ static CBCentralManager *WaitForBluetooth(void) {
             }
             }
         }
-        close(fd);
+        // finish() shuts down the socket to wake this reader. Keep the fd alive
+        // until the reader is finished, then close it on the delegate queue so
+        // another connection cannot reuse its number before finish() runs.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Bridge *bridge = weak;
+            [bridge finish];
+            close(fd);
+            if (bridge.fd == fd) bridge.fd = -1;
+        });
     });
     return YES;
 }

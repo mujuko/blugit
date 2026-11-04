@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const CHUNK: usize = 32768;
@@ -29,7 +29,7 @@ pub async fn send<W: AsyncWrite + Unpin>(writer: &mut W, kind: Kind, data: &[u8]
 }
 
 pub async fn receive<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(Kind, Vec<u8>)> {
-    let kind = match reader.read_u8().await? {
+    let kind = match reader.read_u8().await.context("read frame type")? {
         1 => Kind::Request,
         2 => Kind::Ready,
         3 => Kind::Data,
@@ -40,10 +40,16 @@ pub async fn receive<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(Kind, Vec<
         8 => Kind::Ack,
         _ => bail!("unknown frame type"),
     };
-    let size = reader.read_u32().await? as usize;
+    let size = reader
+        .read_u32()
+        .await
+        .with_context(|| format!("read {kind:?} frame length"))? as usize;
     ensure!(size <= MAX_FRAME, "frame too large");
     let mut data = vec![0; size];
-    reader.read_exact(&mut data).await?;
+    reader
+        .read_exact(&mut data)
+        .await
+        .with_context(|| format!("read {kind:?} payload ({size} bytes)"))?;
     Ok((kind, data))
 }
 
@@ -71,5 +77,19 @@ mod tests {
         assert_eq!(kind, Kind::Data);
         assert_eq!(received, payload);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncated_frames_identify_the_failed_part() {
+        for (bytes, expected) in [
+            (&b""[..], "read frame type"),
+            (&b"\x03\x00\x00"[..], "read Data frame length"),
+            (&b"\x03\x00\x00\x00\x04x"[..], "read Data payload (4 bytes)"),
+        ] {
+            let error = receive(&mut &bytes[..])
+                .await
+                .expect_err("truncated frame must fail");
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
     }
 }

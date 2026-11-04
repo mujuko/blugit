@@ -35,6 +35,8 @@ Mac の権限確認・ホスト初期化は別途最大 60 秒待機します。
 Git Remote Helper は `connect` capability を広告します。`connect git-upload-pack` /
 `connect git-receive-pack` に対し、Bluetooth 側の READY 後に空行を返し、その後の
 標準入出力をバイナリ転送へ切り替えます。診断は stderr にだけ出力します。
+切断エラーには、初回 REQUEST / READY、Git データ転送、最終 ACK の段階と、
+読み取り中だったフレームの種類・長さ・payload の情報を付けます。
 
 Rust の通常ビルドに IP 通信のフォールバックはありません。`test-transport` を明示した
 テスト用ビルドだけが `BLUGIT_TEST_ADDR` のループバック接続と `__test-host` を使えます。
