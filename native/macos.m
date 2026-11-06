@@ -438,14 +438,17 @@ int blugit_macos_main(int argc, const char **argv) {
             BOOL timedOut = !delegate.done;
             if (timedOut) {
                 BOOL started = delegate.startedAt != nil;
-                [inquiry stop];
+                IOReturn stopStatus = [inquiry stop];
+                if (stopStatus != kIOReturnSuccess && stopStatus != kIOReturnNotPermitted)
+                    Fail([NSString stringWithFormat:@"Bluetooth inquiry stop failed: 0x%x; will not probe while inquiry may still be active", stopStatus]);
                 NSDate *stopDeadline = [NSDate dateWithTimeIntervalSinceNow:1];
                 while (!delegate.done && stopDeadline.timeIntervalSinceNow > 0) { PumpMainRunLoop(); }
                 if (!inquiry.foundDevices.count) Fail([NSString stringWithFormat:
                     @"Bluetooth inquiry %@; no results (%@). Try direct probe/join; this is not a completed empty scan.",
-                    started ? @"started but did not complete" : @"never started within 45s (queued or throttled)",
+                    started ? @"completion callback not received" : @"start callback not received within 45s",
                     NSProcessInfo.processInfo.operatingSystemVersionString]);
-                fprintf(stderr, "blugit Bluetooth: inquiry timed out; using %lu partial result(s)\n", (unsigned long)inquiry.foundDevices.count);
+                fprintf(stderr, "blugit Bluetooth: inquiry incomplete (start callback=%s, stop=0x%x, complete callback=%s); using %lu partial result(s)\n",
+                    started ? "received" : "missing", stopStatus, delegate.done ? "received" : "missing", (unsigned long)inquiry.foundDevices.count);
             }
             if (!timedOut && delegate.status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"Bluetooth inquiry failed: 0x%x", delegate.status]);
             for (IOBluetoothDevice *device in inquiry.foundDevices) {
@@ -499,7 +502,9 @@ int blugit_macos_main(int argc, const char **argv) {
                 status = [device openRFCOMMChannelSync:&channel withChannelID:number delegate:bridge];
                 if (!channel) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
             }
-            if (status != kIOReturnSuccess || !channel) Fail([NSString stringWithFormat:@"RFCOMM connect failed: 0x%x", status]);
+            if (status != kIOReturnSuccess || !channel) Fail([NSString stringWithFormat:
+                @"RFCOMM connect failed: 0x%x (device %@, channel %u, source=%@)",
+                status, device.addressString, (unsigned)number, atoi(argv[2]) ? @"direct" : @"SDP"]);
             if (![bridge attach:channel path:@(argv[3])]) Fail(@"Could not attach local Git stream");
             puts("READY");
             for (;;) {

@@ -14,6 +14,11 @@ Windows / macOS / Linux の PC 間で、Bluetooth Classic (RFCOMM) を使い、
 利用者の実機では、直接チャネルと `secure=1` を指定したMac→Windowsの登録済み鍵認証・pushが成功しました。
 近隣探索とチャネルなし接続の再確認は継続中です。
 
+`0.3.2` は探索候補への接続を単独の `probe` と共通化し、探索だけの5秒打ち切りを廃止します。
+Macでは問い合わせ補助プロセスの終了を待ってから接続し、`discover --address <アドレス>` で
+探索候補の1台だけを確認できます。実機のclone/push/pullと単独probeは成功、
+一括探索の修正後の動作確認は継続中です。
+
 Python 版で実機転送が成功した構成を Rust に移植しています。サービス UUID と通信フレームは
 同じで、Python 版と相互接続できます。旧実装は [reference/python](reference/python) に保存しました。
 この移植には、先に検討した SSH・公開鍵認証はまだ含めていません。

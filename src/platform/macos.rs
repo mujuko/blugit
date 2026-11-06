@@ -175,6 +175,18 @@ pub async fn nearby(duration: Duration) -> Result<Vec<(Address, String)>> {
     loop {
         let value = line(&mut output).await?;
         if value == "END" {
+            // END is written before the native inquiry object is released.
+            // Wait for the helper's natural EOF, rather than SIGTERM it in Drop
+            // while the inquiry is still cleaning up, then let the radio settle.
+            let mut tail = [0; 1];
+            ensure!(
+                tokio::time::timeout(Duration::from_secs(5), output.read(&mut tail))
+                    .await
+                    .context("wait for inquiry helper to exit")??
+                    == 0,
+                "unexpected inquiry helper output after END"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
             break;
         }
         if value.starts_with("INQUIRY\t") {

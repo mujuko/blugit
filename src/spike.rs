@@ -7,7 +7,12 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Args)]
 pub struct StateArgs {
@@ -60,6 +65,9 @@ pub enum Commands {
         /// Print probe errors to distinguish connection failures from hidden teams
         #[arg(long)]
         verbose: bool,
+        /// Probe only this address, if it was returned by the inquiry (diagnostic)
+        #[arg(long)]
+        address: Option<crate::endpoint::Address>,
     },
     /// Probe a known host directly, without nearby inquiry or enrollment
     Probe { url: Endpoint },
@@ -170,7 +178,7 @@ pub async fn run(command: Commands) -> Result<()> {
         }
         Commands::Probe { url } => {
             ensure!(url.secure, "use the security-spike URL ending in ?secure=1");
-            let advertisement = security::discover(platform::connect(&url).await?).await?;
+            let advertisement = probe_host(&url).await?;
             match (advertisement.team, advertisement.host) {
                 (Some(team), Some(host)) => println!("{team}\t{} [{}]", host.name, host.short_id()),
                 (None, None) => println!("Host reachable; test team is hidden."),
@@ -178,23 +186,36 @@ pub async fn run(command: Commands) -> Result<()> {
             }
             eprintln!("Discovery data is unverified until code enrollment.");
         }
-        Commands::Discover { seconds, verbose } => {
+        Commands::Discover {
+            seconds,
+            verbose,
+            address: selected,
+        } => {
             eprintln!("Inquiring for nearby Bluetooth Classic devices ({seconds}s)...");
             let devices = platform::nearby(Duration::from_secs(seconds.into())).await?;
+            let devices = candidates(devices, selected);
             eprintln!(
-                "Probing {} candidate device(s), at most 5s each...",
-                devices.len().min(32)
+                "Probing {} candidate device(s) with the same connection timeouts as 'spike probe'...",
+                devices.len()
             );
+            if devices.is_empty() && selected.is_some() {
+                eprintln!("Requested address was not returned by the inquiry.");
+            }
             let mut found = 0;
-            for (address, _) in devices.into_iter().take(32) {
+            for (address, _) in devices {
                 let endpoint = Endpoint {
                     address,
                     channel: None,
                     secure: true,
                 };
-                let probe = async { security::discover(platform::connect(&endpoint).await?).await };
-                match tokio::time::timeout(Duration::from_secs(5), probe).await {
-                    Ok(Ok(ad)) if ad.team.is_some() => {
+                let started = Instant::now();
+                if verbose {
+                    eprintln!("{address}: connecting...");
+                }
+                // Do not kill a platform helper mid-open after an arbitrary 5s.
+                // Both commands use the platform's bounded connection operation.
+                match probe_host(&endpoint).await {
+                    Ok(ad) if ad.team.is_some() => {
                         if let Some(host) = ad.host {
                             println!(
                                 "{}\t{} [{}]\t{}",
@@ -206,21 +227,22 @@ pub async fn run(command: Commands) -> Result<()> {
                             found += 1;
                         }
                     }
-                    Ok(Ok(_)) => {
+                    Ok(_) => {
                         if verbose {
                             eprintln!("{address}: no advertised team");
                         }
                     }
-                    Ok(Err(error)) => {
+                    Err(error) => {
                         if verbose {
                             eprintln!("{address}: {error:#}");
                         }
                     }
-                    Err(_) => {
-                        if verbose {
-                            eprintln!("{address}: probe timed out");
-                        }
-                    }
+                }
+                if verbose {
+                    eprintln!(
+                        "{address}: finished in {:.1}s",
+                        started.elapsed().as_secs_f64()
+                    );
                 }
             }
             eprintln!(
@@ -243,6 +265,37 @@ pub async fn run(command: Commands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn candidates(
+    devices: Vec<(crate::endpoint::Address, String)>,
+    selected: Option<crate::endpoint::Address>,
+) -> Vec<(crate::endpoint::Address, String)> {
+    let mut result = Vec::new();
+    for device in devices {
+        if selected.is_none_or(|address| address == device.0)
+            && !result.iter().any(|(address, _)| *address == device.0)
+        {
+            result.push(device);
+        }
+        if result.len() == 32 {
+            break;
+        }
+    }
+    result
+}
+
+async fn probe_host(endpoint: &Endpoint) -> Result<security::Advertisement> {
+    probe_connection(platform::connect(endpoint)).await
+}
+
+async fn probe_connection(
+    connection: impl Future<Output = Result<platform::Connection>>,
+) -> Result<security::Advertisement> {
+    let stream = connection.await.context("connect Bluetooth candidate")?;
+    security::discover(stream)
+        .await
+        .context("read advertised teams")
 }
 
 struct Server {
@@ -295,5 +348,46 @@ impl Server {
                 eprintln!("Spike connection ended: {error:#}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn discovery_keeps_a_connection_that_takes_more_than_five_seconds() -> Result<()> {
+        // A real advertisement exchange after a simulated slow native open.
+        // The former discover-only timeout dropped this future at five seconds.
+        let directory = tempfile::tempdir()?;
+        let state = State::open(directory.path().into(), Some("Host".into()))?;
+        let (client, server) = tokio::io::duplex(4096);
+        let gate = EnrollmentGate::default();
+        let notify: Notify = Arc::new(|_| panic!("a discovery probe must not enroll"));
+        let connect = async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Ok(Box::new(client) as platform::Connection)
+        };
+        let (advertisement, host) = tokio::join!(
+            probe_connection(connect),
+            security::accept(Box::new(server), &state, false, &gate, &notify)
+        );
+        assert_eq!(advertisement?.team.as_deref(), Some(security::TEAM));
+        assert!(host?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn target_filter_does_not_invent_a_discovered_device_or_duplicate_one() -> Result<()> {
+        let host = "00:A7:50:41:8D:47".parse()?;
+        let other = "AA:BB:CC:DD:EE:FF".parse()?;
+        let devices = vec![
+            (other, "other".into()),
+            (host, "host".into()),
+            (host, "duplicate".into()),
+        ];
+        assert_eq!(candidates(devices, Some(host)), vec![(host, "host".into())]);
+        assert!(candidates(vec![(other, "other".into())], Some(host)).is_empty());
+        Ok(())
     }
 }
