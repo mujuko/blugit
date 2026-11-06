@@ -1,5 +1,8 @@
 # Prototype wire protocol
 
+この文書は従来の認証なしモードの仕様です。`blugit spike` の端末登録・認証・
+暗号化レイヤーは [段階1の技術検証](stage1-spike.md) を参照してください。
+
 Rust と `reference/python` は同じプロトコルを使います。
 この段階では暗号化・認証・バージョン交渉を追加しません。
 

@@ -165,6 +165,20 @@ pub async fn devices() -> Result<Vec<(Address, String)>> {
     Ok(result)
 }
 
+pub async fn nearby(duration: Duration) -> Result<Vec<(Address, String)>> {
+    let (_process, mut output) = start(&["nearby".into(), duration.as_secs().to_string()]).await?;
+    let mut result = Vec::new();
+    loop {
+        let value = line(&mut output).await?;
+        if value == "END" {
+            break;
+        }
+        let (address, name) = value.split_once('\t').context("invalid inquiry result")?;
+        result.push((address.parse()?, name.into()));
+    }
+    Ok(result)
+}
+
 struct Bridge {
     socket: tokio::net::UnixStream,
     _control: Option<BufReader<tokio::net::UnixStream>>,

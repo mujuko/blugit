@@ -3,7 +3,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::mpsc,
@@ -18,10 +18,15 @@ struct Harness {
     helper_path: String,
     address: String,
     host: Child,
+    guest_state: Option<PathBuf>,
 }
 
 impl Harness {
     fn new() -> Self {
+        Self::with_security(false)
+    }
+
+    fn with_security(secure: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_owned();
         let repository = root.join("host repo.git");
@@ -34,13 +39,39 @@ impl Harness {
                 .status
                 .success()
         );
-        let mut host = Command::new(env!("CARGO_BIN_EXE_blugit"))
-            .arg("__test-host")
-            .arg(&repository)
+        let guest_state = secure.then(|| root.join("guest identity"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_blugit"));
+        if secure {
+            command
+                .args(["spike", "__test-host"])
+                .arg(&repository)
+                .arg("--state-dir")
+                .arg(root.join("host identity"))
+                .args(["--name", "Test host"]);
+        } else {
+            command.arg("__test-host").arg(&repository);
+        }
+        let mut host = command
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(if secure {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .spawn()
             .unwrap();
+        let (code_tx, code_rx) = mpsc::channel();
+        if let Some(stderr) = host.stderr.take() {
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if let Some((_, rest)) = line.split_once("CODE=") {
+                        let _ = code_tx.send(rest.split_whitespace().next().unwrap().to_owned());
+                    } else {
+                        eprintln!("{line}");
+                    }
+                }
+            });
+        }
         let stdout = host.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -57,6 +88,28 @@ impl Harness {
             !address.is_empty(),
             "host exited before announcing its test port"
         );
+        if let Some(root) = &guest_state {
+            let mut join = Command::new(env!("CARGO_BIN_EXE_blugit"))
+                .args(["spike", "join", "blugit://AA-BB-CC-DD-EE-FF?secure=1"])
+                .arg("--state-dir")
+                .arg(root)
+                .args(["--name", "Test guest"])
+                .env("BLUGIT_TEST_ADDR", &address)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let code = code_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            writeln!(join.stdin.take().unwrap(), "{code}").unwrap();
+            let output = join.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "join: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("Joined prototype"));
+        }
         let bin = root.join("helper bin");
         fs::create_dir(&bin).unwrap();
         let helper = Path::new(env!("CARGO_BIN_EXE_git-remote-blugit"));
@@ -74,6 +127,7 @@ impl Harness {
             helper_path,
             address,
             host,
+            guest_state,
         }
     }
 
@@ -99,6 +153,11 @@ impl Harness {
             .env("GIT_COMMITTER_NAME", "Prototype Test")
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .env("GIT_TERMINAL_PROMPT", "0");
+        if let Some(root) = &self.guest_state {
+            command.env("BLUGIT_STATE_DIR", root);
+        } else {
+            command.env_remove("BLUGIT_STATE_DIR");
+        }
         command.output().unwrap()
     }
 
@@ -123,11 +182,13 @@ impl Drop for Harness {
 
 #[test]
 fn clone_push_pull_binary_rejection_and_rebase() {
-    for url in [
-        "blugit://AA-BB-CC-DD-EE-FF",
-        "blugit://AA-BB-CC-DD-EE-FF?channel=7",
+    for (secure, url) in [
+        (false, "blugit://AA-BB-CC-DD-EE-FF"),
+        (false, "blugit://AA-BB-CC-DD-EE-FF?channel=7"),
+        (true, "blugit://AA-BB-CC-DD-EE-FF?secure=1"),
+        (true, "blugit://AA-BB-CC-DD-EE-FF?channel=7&secure=1"),
     ] {
-        let harness = Harness::new();
+        let harness = Harness::with_security(secure);
         harness.ok(
             &harness.root,
             &["-c", "init.defaultBranch=main", "clone", url, "guest one"],
@@ -201,4 +262,39 @@ fn failed_git_service_reaches_the_guest() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("does not appear to be a git repository")
     );
+}
+
+#[test]
+fn secure_host_rejects_unregistered_device_and_plaintext_git() {
+    let harness = Harness::with_security(true);
+    let output = harness.git(
+        &harness.root,
+        &[
+            OsStr::new("clone"),
+            OsStr::new("blugit://AA-BB-CC-DD-EE-FF"),
+            OsStr::new("plaintext"),
+        ],
+    );
+    assert!(!output.status.success());
+    let state =
+        blugit::identity::State::open(harness.root.join("stranger"), Some("Test guest".into()))
+            .unwrap();
+    let host_state =
+        blugit::identity::State::open(harness.root.join("host identity"), None).unwrap();
+    state
+        .save_host("AA:BB:CC:DD:EE:FF".parse().unwrap(), host_state.peer())
+        .unwrap();
+    let original = harness.guest_state.as_ref().unwrap();
+    fs::rename(original, harness.root.join("saved identity")).unwrap();
+    fs::rename(state.root(), original).unwrap();
+    let output = harness.git(
+        &harness.root,
+        &[
+            OsStr::new("clone"),
+            OsStr::new("blugit://AA-BB-CC-DD-EE-FF?secure=1"),
+            OsStr::new("unregistered"),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(!harness.root.join("unregistered/.git/objects/pack").exists());
 }

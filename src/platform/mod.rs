@@ -23,7 +23,7 @@ use macos as native;
 #[cfg(target_os = "macos")]
 pub use macos::internal_helper;
 
-pub use native::{Listener, devices, listen, local_address};
+pub use native::{Listener, devices, listen, local_address, nearby};
 
 pub async fn connect(endpoint: &Endpoint) -> Result<Connection> {
     #[cfg(feature = "test-transport")]

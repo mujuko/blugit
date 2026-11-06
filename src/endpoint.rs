@@ -83,6 +83,7 @@ impl Address {
 pub struct Endpoint {
     pub address: Address,
     pub channel: Option<u8>,
+    pub secure: bool,
 }
 
 impl FromStr for Endpoint {
@@ -94,24 +95,47 @@ impl FromStr for Endpoint {
         ensure!(!value.contains('#'), "URL fragments are unsupported");
         let (authority, query) = value.split_once('?').unwrap_or((value, ""));
         let address = authority.strip_suffix('/').unwrap_or(authority).parse()?;
-        let channel = if query.is_empty() {
-            None
-        } else {
-            let number = query.strip_prefix("channel=").unwrap_or("");
-            if number.is_empty()
-                || number.len() > 2
-                || !number.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                bail!("only one optional ?channel=1..30 is supported");
+        let mut channel = None;
+        let mut secure = false;
+        if !query.is_empty() {
+            for parameter in query.split('&') {
+                match parameter.split_once('=') {
+                    Some(("channel", number)) if channel.is_none() => {
+                        ensure!(
+                            !number.is_empty()
+                                && number.len() <= 2
+                                && number.bytes().all(|b| b.is_ascii_digit()),
+                            "invalid RFCOMM channel"
+                        );
+                        let value = number.parse()?;
+                        ensure!(
+                            (1..=30).contains(&value),
+                            "RFCOMM channel must be between 1 and 30"
+                        );
+                        channel = Some(value);
+                    }
+                    Some(("secure", "1")) if !secure => secure = true,
+                    _ => bail!("unsupported or duplicate URL parameter"),
+                }
             }
-            let channel: u8 = number.parse()?;
-            ensure!(
-                (1..=30).contains(&channel),
-                "RFCOMM channel must be between 1 and 30"
-            );
-            Some(channel)
-        };
-        Ok(Self { address, channel })
+        }
+        Ok(Self {
+            address,
+            channel,
+            secure,
+        })
+    }
+}
+
+impl Endpoint {
+    pub fn secure_url(address: Address, channel: Option<u8>) -> String {
+        let mut url = address.url(channel);
+        url.push_str(if channel.is_some() {
+            "&secure=1"
+        } else {
+            "?secure=1"
+        });
+        url
     }
 }
 
@@ -134,6 +158,35 @@ mod tests {
                 .to_string(),
             "AA:BB:CC:DD:EE:FF"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn secure_urls_select_authentication_and_allow_a_direct_channel() -> Result<()> {
+        for channel in [None, Some(1), Some(30)] {
+            let address = "AA:BB:CC:DD:EE:FF".parse()?;
+            let endpoint: Endpoint = Endpoint::secure_url(address, channel).parse()?;
+            assert!(endpoint.secure);
+            assert_eq!(endpoint.channel, channel);
+            assert_eq!(endpoint.address, address);
+        }
+        assert!(
+            "blugit://AA-BB-CC-DD-EE-FF?secure=1&channel=7"
+                .parse::<Endpoint>()?
+                .secure
+        );
+        for query in [
+            "secure=0",
+            "secure=1&secure=1",
+            "secure=1&",
+            "secure=1&unknown=1",
+        ] {
+            assert!(
+                format!("blugit://AA-BB-CC-DD-EE-FF?{query}")
+                    .parse::<Endpoint>()
+                    .is_err()
+            );
+        }
         Ok(())
     }
 

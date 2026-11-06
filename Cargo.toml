@@ -1,6 +1,6 @@
 [package]
 name = "blugit"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Git over offline Bluetooth RFCOMM"
 default-run = "blugit"
@@ -14,6 +14,15 @@ test-transport = []
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dunce = "1"
+dirs = "6"
+hex = "0.4"
+hostname = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+snow = "0.10"
+spake2 = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "process", "sync", "time", "signal"] }
 uuid = "1"
 
@@ -23,7 +32,6 @@ windows-sys = { version = "0.61", features = ["Win32_Devices_Bluetooth", "Win32_
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
-tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bluer = { version = "0.17", features = ["rfcomm", "bluetoothd"] }

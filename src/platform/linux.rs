@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use bluer::rfcomm::{self, Profile, ProfileHandle, Role, SocketAddr};
 use futures_util::StreamExt;
+use std::time::Duration;
 
 async fn adapter() -> Result<(bluer::Session, bluer::Adapter)> {
     let session = bluer::Session::new()
@@ -31,6 +32,37 @@ pub async fn devices() -> Result<Vec<(Address, String)>> {
                 address.to_string().parse()?,
                 device.name().await?.unwrap_or_else(|| "(unnamed)".into()),
             ));
+        }
+    }
+    Ok(result)
+}
+
+pub async fn nearby(duration: Duration) -> Result<Vec<(Address, String)>> {
+    let (_session, adapter) = adapter().await?;
+    adapter
+        .set_discovery_filter(bluer::DiscoveryFilter {
+            transport: bluer::DiscoveryTransport::BrEdr,
+            ..Default::default()
+        })
+        .await?;
+    let events = adapter.discover_devices().await?;
+    tokio::pin!(events);
+    let deadline = tokio::time::sleep(duration);
+    tokio::pin!(deadline);
+    let mut result = Vec::new();
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            event = events.next() => match event {
+                Some(bluer::AdapterEvent::DeviceAdded(address)) => {
+                    let address: Address = address.to_string().parse()?;
+                    if !result.iter().any(|(existing,_)| *existing == address) {
+                        result.push((address, String::new()));
+                    }
+                },
+                Some(_) => {},
+                None => break,
+            }
         }
     }
     Ok(result)

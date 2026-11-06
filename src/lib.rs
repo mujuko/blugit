@@ -1,7 +1,11 @@
 pub mod endpoint;
 pub mod git;
 pub mod helper;
+pub mod identity;
 pub mod platform;
+mod secure_stream;
+pub mod security;
+mod spike;
 pub mod wire;
 
 use anyhow::{Context, Result};
@@ -30,6 +34,11 @@ enum Commands {
     Address,
     /// List paired devices (not nearby discovery)
     Devices,
+    /// Stage-1 technical spike: code enrollment, authenticated Git and discovery
+    Spike {
+        #[command(subcommand)]
+        command: spike::Commands,
+    },
     #[cfg(feature = "test-transport")]
     #[command(hide = true, name = "__test-host")]
     TestHost { repository: PathBuf },
@@ -67,6 +76,7 @@ pub fn entry(helper: bool) -> ExitCode {
 
 async fn run() -> Result<u8> {
     match Cli::parse().command {
+        Commands::Spike { command } => spike::run(command).await?,
         Commands::Address => {
             let address = platform::local_address().await?;
             println!("Bluetooth address: {address}\nURL: {}", address.url(None));

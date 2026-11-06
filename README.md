@@ -2,7 +2,13 @@
 
 Windows / macOS / Linux の PC 間で、Bluetooth Classic (RFCOMM) を使い、
 オフラインで通常の `git clone` / `git push` / `git pull` を行うプロトタイプです。
-ホストは 1 つの bare リポジトリを公開します。認証・チーム管理はありません。
+ホストは 1 つの bare リポジトリを公開します。従来の `blugit host` は認証・チーム管理なしです。
+
+`0.3.0` では段階1の技術検証用に `blugit spike` を追加しました。
+6桁の使い捨て番号による端末登録、登録済み鍵での再接続、暗号化した Git 転送、
+近隣探索と広告無効を検証します。手順と検証済み／未検証の境界は
+[段階1の技術検証](docs/stage1-spike.md) を参照してください。
+本実装のチーム管理はまだ追加していません。段階2以降は `main` で新しく開発する予定です。
 
 Python 版で実機転送が成功した構成を Rust に移植しています。サービス UUID と通信フレームは
 同じで、Python 版と相互接続できます。旧実装は [reference/python](reference/python) に保存しました。

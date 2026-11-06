@@ -151,6 +151,54 @@ pub async fn devices() -> Result<Vec<(Address, String)>> {
     .await?
 }
 
+pub async fn nearby(duration: Duration) -> Result<Vec<(Address, String)>> {
+    // Query the radio first so a missing adapter is not reported as zero teams.
+    local_address().await?;
+    tokio::task::spawn_blocking(move || -> Result<_> {
+        let mut result = Vec::new();
+        // SAFETY: initialized Windows structures; every successful find is closed.
+        unsafe {
+            let mut params: BLUETOOTH_DEVICE_SEARCH_PARAMS = zeroed();
+            params.dwSize = size_of::<BLUETOOTH_DEVICE_SEARCH_PARAMS>() as u32;
+            params.fReturnAuthenticated = 1;
+            params.fReturnRemembered = 1;
+            params.fReturnUnknown = 1;
+            params.fReturnConnected = 1;
+            params.fIssueInquiry = 1;
+            params.cTimeoutMultiplier = duration.as_millis().div_ceil(1280).clamp(1, 48) as u8;
+            let mut info: BLUETOOTH_DEVICE_INFO = zeroed();
+            info.dwSize = size_of::<BLUETOOTH_DEVICE_INFO>() as u32;
+            let find = BluetoothFindFirstDevice(&params, &mut info);
+            if find.is_null() {
+                let error = io::Error::last_os_error();
+                ensure!(
+                    error.raw_os_error() == Some(259),
+                    "Bluetooth inquiry failed: {error}"
+                );
+                return Ok(result);
+            }
+            loop {
+                if let Ok(address) = Address::from_u64(info.Address.Anonymous.ullLong) {
+                    let length = info
+                        .szName
+                        .iter()
+                        .position(|ch| *ch == 0)
+                        .unwrap_or(info.szName.len());
+                    if !result.iter().any(|(existing, _)| *existing == address) {
+                        result.push((address, String::from_utf16_lossy(&info.szName[..length])));
+                    }
+                }
+                if BluetoothFindNextDevice(find, &mut info) == 0 {
+                    break;
+                }
+            }
+            BluetoothFindDeviceClose(find);
+        }
+        Ok(result)
+    })
+    .await?
+}
+
 fn publish(channel: u8, operation: WSAESETSERVICEOP) -> Result<()> {
     let mut identifier = service_guid();
     let mut address = SOCKADDR_BTH {

@@ -60,6 +60,12 @@ async fn transfer(endpoint: &Endpoint, service: &[u8]) -> Result<u8> {
     let mut stream = platform::connect(endpoint)
         .await
         .context("connect Bluetooth transport")?;
+    if endpoint.secure {
+        let state = crate::identity::State::open(crate::identity::State::default_root()?, None)?;
+        stream = crate::security::connect(stream, &state, endpoint.address)
+            .await
+            .context("authenticate registered device (no plaintext fallback)")?;
+    }
     wire::send(&mut stream, Kind::Request, service)
         .await
         .context("send initial REQUEST to host")?;

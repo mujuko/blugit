@@ -311,6 +311,52 @@ static NSDictionary *ServiceRecord(int channel) {
     };
 }
 
+@interface Inquiry : NSObject <IOBluetoothDeviceInquiryDelegate>
+@property(nonatomic) BOOL done;
+@property(nonatomic) IOReturn status;
+@end
+@implementation Inquiry
+- (void)deviceInquiryComplete:(IOBluetoothDeviceInquiry *)sender error:(IOReturn)error aborted:(BOOL)aborted {
+    (void)sender;
+    self.status = aborted && error == kIOReturnSuccess ? kIOReturnAborted : error;
+    self.done = YES;
+}
+@end
+
+@interface ServiceQuery : NSObject
+@property(nonatomic) BOOL done;
+@property(nonatomic) IOReturn status;
+@end
+@implementation ServiceQuery
+- (void)sdpQueryComplete:(IOBluetoothDevice *)device status:(IOReturn)status {
+    (void)device;
+    self.status = status;
+    self.done = YES;
+}
+@end
+
+static BluetoothRFCOMMChannelID ResolveChannel(IOBluetoothDevice *device) {
+    uuid_t bytes;
+    [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
+    IOBluetoothSDPUUID *uuid = [IOBluetoothSDPUUID uuidWithBytes:bytes length:16];
+    // getServiceRecordForUUID only reads cached results. Explicitly query SDP
+    // so a newly discovered, unpaired host can be resolved without old cache.
+    __attribute__((objc_precise_lifetime)) ServiceQuery *query = [ServiceQuery new];
+    IOReturn status = [device performSDPQuery:query uuids:@[uuid]];
+    if (status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"SDP query failed to start: 0x%x", status]);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+    while (!query.done && deadline.timeIntervalSinceNow > 0) {
+        @autoreleasepool { [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+    }
+    if (!query.done) Fail(@"SDP query timed out; try the host's Direct channel URL");
+    if (query.status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"SDP query failed: 0x%x", query.status]);
+    IOBluetoothSDPServiceRecord *record = [device getServiceRecordForUUID:uuid];
+    BluetoothRFCOMMChannelID channel = 0;
+    if (!record || [record getRFCOMMChannelID:&channel] != kIOReturnSuccess || channel < 1 || channel > 30)
+        Fail(@"Service not found; use the host's Direct channel URL");
+    return channel;
+}
+
 int blugit_macos_main(int argc, const char **argv) {
     @autoreleasepool {
         signal(SIGPIPE, SIG_IGN);
@@ -327,6 +373,27 @@ int blugit_macos_main(int argc, const char **argv) {
         }
         if ([mode isEqualToString:@"devices"]) {
             for (IOBluetoothDevice *device in [IOBluetoothDevice pairedDevices]) {
+                NSString *name = device.name ?: @"(unnamed)";
+                name = [[name stringByReplacingOccurrencesOfString:@"\n" withString:@" "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
+                printf("%s\t%s\n", device.addressString.UTF8String, name.UTF8String);
+            }
+            puts("END"); return 0;
+        }
+        if ([mode isEqualToString:@"nearby"] && argc == 2) {
+            __attribute__((objc_precise_lifetime)) Inquiry *delegate = [Inquiry new];
+            __attribute__((objc_precise_lifetime)) IOBluetoothDeviceInquiry *inquiry =
+                [IOBluetoothDeviceInquiry inquiryWithDelegate:delegate];
+            inquiry.inquiryLength = (uint8_t)MAX(2, MIN(30, atoi(argv[1])));
+            inquiry.updateNewDeviceNames = NO;
+            IOReturn status = [inquiry start];
+            if (status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"Bluetooth inquiry failed: 0x%x", status]);
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:inquiry.inquiryLength + 10];
+            while (!delegate.done && deadline.timeIntervalSinceNow > 0) {
+                @autoreleasepool { [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
+            }
+            if (!delegate.done) { [inquiry stop]; Fail(@"Bluetooth inquiry timed out"); }
+            if (delegate.status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"Bluetooth inquiry failed: 0x%x", delegate.status]);
+            for (IOBluetoothDevice *device in inquiry.foundDevices) {
                 NSString *name = device.name ?: @"(unnamed)";
                 name = [[name stringByReplacingOccurrencesOfString:@"\n" withString:@" "] stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
                 printf("%s\t%s\n", device.addressString.UTF8String, name.UTF8String);
@@ -370,12 +437,7 @@ int blugit_macos_main(int argc, const char **argv) {
             IOReturn status = [device openConnection];
             if (status != kIOReturnSuccess) Fail([NSString stringWithFormat:@"Baseband connect failed: 0x%x", status]);
             BluetoothRFCOMMChannelID number = (BluetoothRFCOMMChannelID)atoi(argv[2]);
-            if (!number) {
-                uuid_t bytes;
-                [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
-                IOBluetoothSDPServiceRecord *record = [device getServiceRecordForUUID:[IOBluetoothSDPUUID uuidWithBytes:bytes length:16]];
-                if (!record || [record getRFCOMMChannelID:&number] != kIOReturnSuccess) Fail(@"Service not found; use the host's Direct channel URL");
-            }
+            if (!number) number = ResolveChannel(device);
             Bridge *bridge = [Bridge new];
             IOBluetoothRFCOMMChannel *channel = nil;
             for (int attempt = 0; attempt < 4 && !channel; ++attempt) {
