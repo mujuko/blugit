@@ -3,7 +3,7 @@
 //! Unix sockets to RFCOMM without opening any IP listener.
 use super::Connection;
 use crate::endpoint::{Address, Endpoint};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     ffi::CString,
     hash::{Hash, Hasher},
@@ -143,7 +143,11 @@ async fn line(output: &mut BufReader<tokio::net::UnixStream>) -> Result<String> 
         length > 0 && length < 4096,
         "Bluetooth helper exited; check Bluetooth permissions and the radio"
     );
-    Ok(value.trim_end().into())
+    let value = value.trim_end();
+    if let Some(error) = value.strip_prefix("ERROR\t") {
+        bail!("Bluetooth helper: {error}");
+    }
+    Ok(value.into())
 }
 
 pub async fn local_address() -> Result<Address> {
@@ -172,6 +176,9 @@ pub async fn nearby(duration: Duration) -> Result<Vec<(Address, String)>> {
         let value = line(&mut output).await?;
         if value == "END" {
             break;
+        }
+        if value.starts_with("INQUIRY\t") {
+            continue;
         }
         let (address, name) = value.split_once('\t').context("invalid inquiry result")?;
         result.push((address.parse()?, name.into()));

@@ -2,7 +2,7 @@
 
 ## 目的と範囲
 
-`prototype` ブランチの `0.3.0` で、以下の成立条件を確認する。
+`prototype` ブランチの技術検証（現在 `0.3.1`、初版 `0.3.0`）で、以下の成立条件を確認する。
 
 1. 申請時にホストだけに出る6桁番号で、ゲスト端末を初回登録する。
 2. 次回以降は番号入力なしで双方の登録済み鍵を確認し、通常の `git clone/pull/push` を行う。
@@ -15,8 +15,8 @@
 
 ## 実行環境とソース
 
-両端末で同じ `0.3.0` のソースを使う。未コミットの作業をMacで試す場合は、
-この作業で作る `blugit-stage1-source.zip` をUSB等でコピーして展開する。
+両端末で同じ `0.3.1` のソースを使う。未コミットの作業をMacで試す場合は、
+この作業で作る `blugit-stage1-0.3.1-source.zip` をUSB等でコピーして展開する。
 その場合は `git pull` ではなく、ZIP展開先でインストールする。
 公開リモートに今回の変更が反映されたとは限らない。
 
@@ -29,7 +29,7 @@ blugit --version
 git-remote-blugit --version
 ```
 
-両方 `0.3.0` であること。実機には `--features test-transport` を付けない。
+両方 `0.3.1` であること。実機には `--features test-transport` を付けない。
 旧Python環境よりCargoのbinがPATHの先にあることも確認する。
 
 ## 手順A：Windowsホスト → Macゲスト
@@ -137,6 +137,9 @@ blugit spike discover --seconds 8 --verbose
 blugitの探索応答を確認する。候補にはOSのキャッシュが混ざる場合もある。
 検証では候補を最大32台、各プローブを最大5秒に制限している。
 `--seconds` は問い合わせ期間で、コマンド全体の終了時間ではない。
+MacではOSによる開始待ちを最大45秒、開始後は問い合わせ期間＋10秒まで待つ。
+待ち時間と実探索時間を分けてログに出し、完了せず0件の場合はエラーにする。
+途中で得た候補がある場合は、部分結果であることを表示してプローブする。
 探索に出た名前・端末IDは、番号で初回登録するまでは未確認の情報。
 
 探索と接続先の問題を切り分けるには、既知のURLを直接プローブする。
@@ -206,6 +209,8 @@ Windowsは保存先のACLを継承する。秘密鍵のOS資格情報ストア�
 Noiseが確認した相手の静的鍵と申請情報の鍵を照合する。
 暗号化した登録確認を受け取って初めてホスト側のメンバーを保存し、
 ゲストは暗号化した受理通知を受け取ってホストを保存する。
+`0.3.1` はさらにゲストの保存完了通知とホストの最終応答を交換し、最後の送信が
+無線の相手に届いたことを確認してからゲストが終了する。下位ストリームのEOFは登録成功条件にしない。
 最終通知の受信前などに切断すると片側だけ保存済みになる可能性がある。新しい番号で再登録できる。
 番号自体やPAKEの導出鍵は保存・送信しない。
 
@@ -229,7 +234,7 @@ Git転送の正常終了自体は既存のEXIT/ACKで判断する。
 - [Snow Builder](https://docs.rs/snow/0.10.0/snow/struct.Builder.html)、[Noise仕様](https://noiseprotocol.org/noise.html)：PSK、prologue、静的鍵、KK/XXとトランスポート。
 - [Windows探索パラメーター](https://learn.microsoft.com/en-us/windows/win32/api/bluetoothapis/ns-bluetoothapis-bluetooth_device_search_params)：未登録端末を含む問い合わせ、1.28秒単位の期間。
 - [Apple IOBluetoothDeviceInquiry](https://developer.apple.com/documentation/iobluetooth/iobluetoothdeviceinquiry)：近隣探索。
-- [Apple getServiceRecord](https://developer.apple.com/documentation/iobluetooth/iobluetoothdevice/getservicerecord(for:))、[performSDPQuery](https://developer.apple.com/documentation/iobluetooth/iobluetoothdevice/performsdpquery(_:uuids:))：前者はキャッシュ検索のみのため、新規接続では後者でサービスを問い合わせる。
+- [Apple getServiceRecord](https://developer.apple.com/documentation/iobluetooth/iobluetoothdevice/getservicerecord(for:))、[performSDPQuery](https://developer.apple.com/documentation/iobluetooth/iobluetoothdevice/performsdpquery(_:uuids:))：前者はキャッシュ検索。`0.3.1` はbaseband接続後のキャッシュを先に利用し、未取得の場合だけ問い合わせる。
 - [BlueZ Adapter API](https://github.com/bluez/bluez/blob/master/doc/org.bluez.Adapter.rst)：BR/EDR探索と検出可能設定。
 
 ## 確認済みと未確認
@@ -263,3 +268,54 @@ Remote Helperで接続する。release版の両バイナリの表示は `0.3.0`�
 段階1の完了条件は、手順A〜Cの実機結果が揃い、探索が成立するOS設定・権限・制約を記録できること。
 探索で見えなくても直接指定で通信できるかを分けて記録する。
 `main`での段階2の開発は、それを踏まえて始める。
+
+## 2026-11-07：利用者の実機結果と0.3.1での修正
+
+Windowsホスト／macOS 27.2ゲスト、`0.3.0` の実行ログを利用者から受領した。
+ここは利用者の観測であり、このWindows作業環境からMacを操作して追試した結果ではない。
+
+| 項目 | 観測・判断 |
+|---|---|
+| 6桁番号での初回登録 | Macに `Joined prototype ...`。その出力までの実装経路で双方の鍵の確認・保存が成功している |
+| 登録後のホストログ | `encrypted stream truncated before authenticated close`。登録保存後、末尾の終了データを待つ処理でエラー。登録失敗とは区別する |
+| 近隣探索 | MacのIOBluetooth問い合わせがタイムアウト。探索が完了して0件だったという証拠ではない |
+| チャネルなし接続 | MacのSDP問い合わせがタイムアウト。Git処理や再認証より前で停止 |
+| 直接チャネル＋secure URLでのpush | 利用者がoriginを `?channel=4&secure=1` に変更すると `main -> main` が成功。保存済み鍵での相互認証と暗号化したGit pushを実機で確認 |
+| 元のorigin | `secure=1` なしの旧モードURL。SDP問題の解消に加え、認証付きURLへの変更も必要だった |
+
+認識の修正：初版では「明示的なSDP問い合わせを必ず行えば改善できる」と実装したが、
+APIの成功戻り値は開始の受理であり、利用環境で完了通知が来ることまでは確認できていなかった。
+[aio-rfcomm開発元の観測](https://dlech.github.io/aio-rfcomm/known-bugs/#asking-a-device-for-its-services-does-not-ask-it)
+にもmacOS 26.6.2でキャッシュ利用やコールバック未到達の事例がある。
+macOS 27.2で今回の原因が同一とは未確定。
+
+`0.3.1` の変更：
+
+- 登録後の終了を、ゲストACK→ホスト最終応答に変更。Macの補助プロセスを切る前に、最後の送信が届いたことを確認する。
+- ローカル書き込みを別タスクで遅延転送し、親ストリームの破棄で未送信データが失われる回帰テストを追加。
+- MacのSDPは接続後のキャッシュを優先し、必要な場合だけ問い合わせ、完了通知待ち中もレコードの取得を確認する。
+- Macの探索は開始待ちと実探索の時間を分離し、Core Foundationのメインrun loopで待つ。
+  [Appleの開始通知仕様](https://developer.apple.com/documentation/iobluetooth/iobluetoothdeviceinquirydelegate/deviceinquirystarted(_:))は、OSの抑制によって開始通知が遅れる場合があるとしている。
+- ヘルパーの具体的なエラーをRustへ渡す。探索タイムアウトを一律に権限・アダプター問題として表示しない。
+- ホストに `Registered ...` と `Authenticated ...` を表示し、登録と再認証を見分けられるようにする。
+
+状態ファイルの形式は変更しない。両端末を更新しても既存の登録は維持でき、pushの再試験に再登録は不要。
+新しい登録終了処理を試す場合は両端末を `0.3.1` に揃える。
+修正後のMacの探索・SDP・登録終了と、pull・逆方向転送はまだ実機未確認。
+
+Windowsでの修正版の検証は、テスト18件＋Git統合3件の計21件が成功。
+フォーマット、Clippy、releaseビルドも成功。Macのネイティブ部分はこの環境ではビルドしていない。
+
+再試験は両端末のソースを更新して `cargo install --path . --locked --force` を実行し、
+両バイナリが `0.3.1` と表示されることを確認して、Windowsホストを再起動する。
+最初は直接チャネル付きURLのまま登録済み鍵でpushできることを確認する。
+次にMacで、ホストのアドレスを指定して以下を実行する。
+
+```sh
+blugit spike probe 'blugit://AA-BB-CC-DD-EE-FF?secure=1'
+blugit spike discover --seconds 8 --verbose
+```
+
+前者はSDP解決、後者は近隣問い合わせ＋SDP解決を含む。
+チャネル番号はホスト再起動で変わることがあるため、直接URLは現在表示された値を使う。
+登録終了のエラー解消を確認する場合だけ、現在の直接URLでもう一度 `spike join` する。

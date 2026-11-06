@@ -16,7 +16,12 @@ fn main() {
             build.define("BLUGIT_TEST_TRANSPORT", None);
         }
         build.compile("blugit_macos");
-        for framework in ["Foundation", "IOBluetooth", "CoreBluetooth"] {
+        for framework in [
+            "Foundation",
+            "CoreFoundation",
+            "IOBluetooth",
+            "CoreBluetooth",
+        ] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     }
