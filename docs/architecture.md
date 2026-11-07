@@ -86,17 +86,15 @@ OSから実際の割当番号を読み取り、明示した番号との一致と
 | OS | 自動選択の方法 |
 |---|---|
 | Windows | `BT_PORT_ANY` でbindし、`getsockname` で割当番号を取得する。[API仕様](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-bind) |
-| macOS | ローカルサービス登録時の空きチャネル割当を使い、実際の番号で接続通知を受け付ける。[API仕様](https://developer.apple.com/documentation/iobluetooth/iobluetoothsdpservicerecord/publishedservicerecord(with:)) |
+| macOS | アダプター別のプロセス間ロックで空き番号を予約し、SDPの実際の番号との一致を確認して接続通知を受け付ける。[API仕様](https://developer.apple.com/documentation/iobluetooth/iobluetoothsdpservicerecord/publishedservicerecord(with:)) |
 | Linux | RFCOMMソケットのチャネル0で動的割当を要求し、`local_addr` で割当番号を取得する。[API仕様](https://docs.rs/bluer/0.17.4/bluer/rfcomm/struct.Listener.html) |
 
 ### 再起動後の接続先の更新
 
-同じアドレスとチャネルなら、再起動や公開リポジトリの切替後も同じ接続コードになる。
-
-自動選択では、再起動時にチャネルと接続コードが変わる場合がある。
-ゲストは新しいコードで同じ登録名に再登録し、6桁番号で確認して保存済みの接続先を更新する。
-
-共有IDと登録名は維持されるため、既存のoriginをそのまま使える。
+自動選択では、再起動時にチャネルと初回登録用の接続コードが変わる場合がある。
+登録済みゲストは保存済み番号で失敗したら、同じBluetoothアドレス内の接続口を探し直す。
+保存済みSSHホスト鍵と共有IDを認証できたときだけチャネルを更新し、共有ID・登録名・originを維持する。
+チャネルの変更だけでは6桁番号や再登録を要求しない。探索の期限・キャッシュ更新・SDPとの関係は[自動解決の設計](channel-resolution.md)を参照。
 
 ### 登録名の重複と再登録
 
@@ -164,7 +162,7 @@ Noiseと独自の暗号化レコードは、この初回登録だけに使用す
 
 **RFCOMMのバイトストリーム上にSSHクライアント／サーバーを直接接続する。**
 `russh` をアプリに組み込み、OSのsshd・IPリスナー・OSアカウント・ssh-agentの設定を必要としない。
-SSHのユーザー名は登録済み端末IDで、ホストはそのIDに登録したEd25519鍵の署名を検証する。
+SSHのユーザー名は `共有ID.端末ID` とし、ホストは公開中の共有IDとの一致と、その端末IDに登録したEd25519鍵の署名を検証する。
 ゲストは登録済みのSSHホスト鍵と完全一致する鍵だけを受け入れる。TOFUや対話的な自動承認は行わない。
 
 端末識別／登録に使うX25519鍵と、SSHで署名に使うEd25519鍵は独立した乱数で生成する。
@@ -232,6 +230,8 @@ clone・pullは `git upload-pack`、pushは `git receive-pack` を使い、親�
 
 接続受付を閉じ、認証・登録待ちを取り消す。
 Git execを許可済みの接続は、Gitの出力・終了通知とSSH接続の終了まで待つ。
+Git子プロセスとmacOSのBluetooth補助プロセスは別のプロセスグループで起動し、端末のCtrl+Cが直接転送を中断しないようにする。
+macOSでは受付を閉じても、進行中の接続がある間は補助プロセスと番号の予約を保持する。
 
 ### 2回目：転送を中断する
 
@@ -308,7 +308,7 @@ Gitディレクトリには既存の権限を保ったままIDマーカーを追
 | `cli` / `helper` | ユーザーの操作、Git Remote Helperの入出力 |
 | `model` / `endpoint` / `connection_code` | 端末・共有ID・接続先の型、12文字コードの符号化と入力検証 |
 | `storage` | 端末鍵、ホスト登録、ローカル名、共有情報、権限の保存 |
-| `client` / `protocol` | 接続先の解決、番号による初回登録、端末鍵とSSH公開鍵の交換 |
+| `client` / `resolver` / `protocol` | 認証によるチャネル再解決、番号による初回登録、端末鍵とSSH公開鍵の交換 |
 | `ssh` | SSHホスト鍵照合、公開鍵認証、Git execの許可、SSH接続の終了と取消 |
 | `server` | 接続の受付、上限管理、停止時の待機と中断 |
 | `git` | 許可コマンドの検証、Git子プロセス、SSHチャネルとの入出力・終了状態の中継 |

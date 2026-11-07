@@ -140,20 +140,22 @@ impl Harness {
         assert!(String::from_utf8_lossy(&output.stdout).contains("git clone blugit://demo"));
     }
     fn enroll(&self, name: &str, wrong_code: bool) -> Output {
+        self.enroll_at(&self.host, name, wrong_code)
+    }
+    fn enroll_at(&self, host: &RunningHost, name: &str, wrong_code: bool) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_blugit"))
             .arg("--state-dir")
             .arg(&self.guest_state)
             .arg("join")
-            .arg(&self.host.code)
+            .arg(&host.code)
             .arg(name)
-            .env("BLUGIT_TEST_ADDR", &self.host.address)
+            .env("BLUGIT_TEST_ADDR", &host.address)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let code = self
-            .host
+        let code = host
             .codes
             .recv_timeout(Duration::from_secs(10))
             .expect("host did not issue a code");
@@ -434,6 +436,14 @@ fn moved_channel_is_authenticated_and_cached_without_reenrollment() {
     )
     .unwrap();
     let wrong_share = RunningHost::start(&other_repo, &same_host_state);
+    // The same guest is authorized for both repositories. Host-key checking
+    // and device authentication alone must not select the wrong share.
+    let enrolled = h.enroll_at(&wrong_share, "other", false);
+    assert!(
+        enrolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&enrolled.stderr)
+    );
     let stranger = RunningHost::start(&other_repo, &h.root.join("stranger state"));
     h.routes = Some(
         serde_json::json!({"7":wrong_share.address,"3":stranger.address,"12":h.host.address})
