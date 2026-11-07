@@ -4,6 +4,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <IOBluetooth/IOBluetooth.h>
 #import <CoreBluetooth/CoreBluetooth.h>
+#import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -189,21 +190,64 @@ static void Fail(NSString *message) {
 - (void)centralManagerDidUpdateState:(CBCentralManager *)manager { (void)manager; }
 @end
 
+static const char *PowerStateName(CBManagerState state) {
+    switch (state) {
+        case CBManagerStateUnknown: return "unknown";
+        case CBManagerStateResetting: return "resetting";
+        case CBManagerStateUnsupported: return "unsupported";
+        case CBManagerStateUnauthorized: return "unauthorized";
+        case CBManagerStatePoweredOff: return "powered-off";
+        case CBManagerStatePoweredOn: return "powered-on";
+    }
+    return "unrecognized";
+}
+
+static const char *AuthorizationName(CBManagerAuthorization authorization) {
+    switch (authorization) {
+        case CBManagerAuthorizationNotDetermined: return "not-determined";
+        case CBManagerAuthorizationRestricted: return "restricted";
+        case CBManagerAuthorizationDenied: return "denied";
+        case CBManagerAuthorizationAllowedAlways: return "allowed";
+    }
+    return "unrecognized";
+}
+
 static CBCentralManager *WaitForBluetooth(void) {
+    // This helper is started with posix_spawn, so complete AppKit registration
+    // before TCC needs to present a first-use or updated-code permission prompt.
+    NSApplication *application = NSApplication.sharedApplication;
+    [application setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    [application finishLaunching];
+    if (CBManager.authorization == CBManagerAuthorizationNotDetermined) {
+        fprintf(stderr, "blugit Bluetooth: waiting for macOS permission approval\n");
+        if (@available(macOS 14.0, *)) { [application activate]; }
+        else { [NSRunningApplication.currentApplication activateWithOptions:0]; }
+    }
     PowerDelegate *delegate = [PowerDelegate new];
     CBCentralManager *manager = [[CBCentralManager alloc] initWithDelegate:delegate queue:nil options:@{CBCentralManagerOptionShowPowerAlertKey: @NO}];
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+        fprintf(stderr, "blugit Bluetooth: state=%s authorization=%s\n", PowerStateName(manager.state), AuthorizationName(CBManager.authorization));
+    }
     // Retain the delegate because CBCentralManager's delegate property is weak.
     static PowerDelegate *retained;
     retained = delegate;
     (void)retained;
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:55];
     while (manager.state == CBManagerStateUnknown || manager.state == CBManagerStateResetting || CBManager.authorization == CBManagerAuthorizationNotDetermined) {
-        if (deadline.timeIntervalSinceNow <= 0) Fail(@"Bluetooth initialization timed out");
+        if (deadline.timeIntervalSinceNow <= 0) Fail([NSString stringWithFormat:@"Bluetooth initialization timed out (state=%s, authorization=%s); check blugit's Bluetooth permission prompt", PowerStateName(manager.state), AuthorizationName(CBManager.authorization)]);
         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
-    if (manager.state != CBManagerStatePoweredOn) Fail(@"Bluetooth is off, unavailable, or permission was denied");
+    if (manager.state != CBManagerStatePoweredOn) Fail([NSString stringWithFormat:@"Bluetooth is unavailable (state=%s, authorization=%s)", PowerStateName(manager.state), AuthorizationName(CBManager.authorization)]);
     return manager;
 }
+
+#ifdef BLUGIT_STANDALONE_HELPER
+int blugit_macos_main(int argc, const char **argv);
+int main(int argc, char **argv) {
+    if (argc < 2 || strcmp(argv[1], "__bluetooth") != 0) return 2;
+    return blugit_macos_main(argc - 2, (const char **)(argv + 2));
+}
+#endif
 
 @interface Bridge : NSObject <IOBluetoothRFCOMMChannelDelegate>
 @property(nonatomic, strong) IOBluetoothRFCOMMChannel *channel;
@@ -385,6 +429,8 @@ int blugit_macos_main(int argc, const char **argv) {
         if (argc < 1) return 2;
         InstallTermination();
         LiveBridges = [NSMutableSet new];
+        // Cancellation also applies while AppKit/TCC is still initializing.
+        MonitorParent();
         __attribute__((objc_precise_lifetime)) CBCentralManager *power = WaitForBluetooth();
         NSString *mode = @(argv[0]);
         NSString *address = IOBluetoothHostController.defaultController.addressAsString;
@@ -393,7 +439,6 @@ int blugit_macos_main(int argc, const char **argv) {
         if ([mode isEqualToString:@"host"] && argc == 3) {
             int requested = atoi(argv[2]);
             if (requested < 0 || requested > 30) Fail(@"Invalid RFCOMM channel");
-            MonitorParent();
             __attribute__((objc_precise_lifetime)) Listener *listener = [Listener new];
             listener.path = @(argv[1]);
             // The reservation namespace is independent of BLUGIT_HOME and the
@@ -429,7 +474,7 @@ int blugit_macos_main(int argc, const char **argv) {
             }
         }
         if ([mode isEqualToString:@"connect"] && argc == 4) {
-            Guest = YES; MonitorParent(); puts("POWER");
+            Guest = YES; puts("POWER");
             int number = atoi(argv[2]);
             if (number < 1 || number > 30) Fail(@"A direct RFCOMM channel is required");
             IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:@(argv[1])];

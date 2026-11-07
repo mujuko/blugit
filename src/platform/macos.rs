@@ -46,11 +46,11 @@ pub fn internal_helper() -> Option<u8> {
 }
 
 fn bundled_helper() -> Result<PathBuf> {
-    let current = std::env::current_exe()?;
-    let sibling = current.with_file_name("blugit");
-    let bytes = std::fs::read(if sibling.is_file() { sibling } else { current })?;
+    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/blugit-bluetooth"));
+    let plist = include_str!("../../native/Info.plist");
     let mut hash = std::hash::DefaultHasher::new();
     bytes.hash(&mut hash);
+    plist.hash(&mut hash);
     let home = std::env::var_os("HOME").context("HOME is unset")?;
     let parent = PathBuf::from(home)
         .join("Library/Caches/blugit")
@@ -67,10 +67,7 @@ fn bundled_helper() -> Result<PathBuf> {
     std::fs::create_dir_all(staged_binary.parent().context("bundle parent")?)?;
     std::fs::write(&staged_binary, bytes)?;
     std::fs::set_permissions(&staged_binary, std::fs::Permissions::from_mode(0o755))?;
-    std::fs::write(
-        staged_bundle.join("Contents/Info.plist"),
-        include_str!("../../native/Info.plist"),
-    )?;
+    std::fs::write(staged_bundle.join("Contents/Info.plist"), plist)?;
     if let Err(error) = std::fs::rename(&staged_bundle, &bundle)
         && !executable.is_file()
     {
@@ -306,6 +303,35 @@ mod tests {
             requested: i32,
             selected: *mut i32,
         ) -> i32;
+    }
+
+    #[tokio::test]
+    async fn standalone_helper_rejects_public_cli_arguments_without_initializing_the_radio()
+    -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let helper = directory.path().join("blugit-bluetooth");
+        std::fs::write(
+            &helper,
+            include_bytes!(concat!(env!("OUT_DIR"), "/blugit-bluetooth")),
+        )?;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new(&helper)
+                .arg("unexpected-public-command")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
     }
 
     fn reserve(directory: &Path, requested: i32) -> io::Result<(OwnedFd, i32)> {
