@@ -9,8 +9,10 @@ pub mod model;
 pub mod platform;
 pub mod protocol;
 pub mod server;
+pub mod ssh;
 pub mod storage;
-pub mod wire;
+#[cfg(test)]
+mod test_support;
 
 pub fn entry(helper: bool) -> std::process::ExitCode {
     #[cfg(target_os = "macos")]

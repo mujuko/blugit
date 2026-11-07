@@ -17,8 +17,8 @@ pub(super) async fn exchange(
     code: Code,
     initiator: bool,
 ) -> Result<Connection> {
-    let client_id = [b"blugit/v1/client/".as_slice(), transcript].concat();
-    let host_id = [b"blugit/v1/host/".as_slice(), transcript].concat();
+    let client_id = [b"blugit/v2/client/".as_slice(), transcript].concat();
+    let host_id = [b"blugit/v2/host/".as_slice(), transcript].concat();
     let password = Password::new(code.as_str().as_bytes());
     let (pake, message) = if initiator {
         Spake2::<Ed25519Group>::start_a(
@@ -48,5 +48,5 @@ pub(super) async fn exchange(
     let key = Zeroizing::new(
         <[u8; 32]>::try_from(secret).map_err(|_| anyhow::anyhow!("invalid SPAKE2 key length"))?,
     );
-    handshake::exchange(stream, device, peer, transcript, Some(&key), initiator).await
+    handshake::exchange(stream, device, peer, transcript, &key, initiator).await
 }

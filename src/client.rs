@@ -2,18 +2,18 @@
 use crate::{
     endpoint::{Contact, Endpoint},
     model::Peer,
-    platform::{self, Connection},
+    platform,
     protocol::{self, Code},
     storage::{Alias, AliasStore, Device, TrustStore},
 };
 use anyhow::{Context, Result};
 use std::future::Future;
 
-pub async fn connect(name: &Alias) -> Result<Connection> {
+pub async fn connect(name: &Alias) -> Result<crate::ssh::Session> {
     let device = Device::open(Device::default_root()?, None)?;
     connect_named(&device, name).await
 }
-pub async fn connect_named(device: &Device, name: &Alias) -> Result<Connection> {
+pub async fn connect_named(device: &Device, name: &Alias) -> Result<crate::ssh::Session> {
     let endpoint = AliasStore::new(device.root().into())
         .resolve(name)?
         .with_context(|| {
@@ -21,14 +21,14 @@ pub async fn connect_named(device: &Device, name: &Alias) -> Result<Connection> 
         })?;
     connect_as(device, &endpoint).await
 }
-pub async fn connect_as(device: &Device, endpoint: &Endpoint) -> Result<Connection> {
+pub async fn connect_as(device: &Device, endpoint: &Endpoint) -> Result<crate::ssh::Session> {
     TrustStore::new(device.root().into())
         .host(endpoint)?
         .context("repository not registered; run blugit join first")?;
     let stream = platform::connect(&endpoint.contact())
         .await
         .context("connect Bluetooth transport")?;
-    protocol::connect(stream, device, endpoint)
+    crate::ssh::connect(stream, device, endpoint)
         .await
         .context("authenticate repository connection")
 }

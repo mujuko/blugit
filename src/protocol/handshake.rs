@@ -7,22 +7,13 @@ pub(super) async fn exchange(
     device: &Device,
     peer: &Peer,
     transcript: &[u8],
-    psk: Option<&[u8; 32]>,
+    psk: &[u8; 32],
     initiator: bool,
 ) -> Result<Connection> {
-    let pattern = if psk.is_some() {
-        "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s"
-    } else {
-        "Noise_KK_25519_ChaChaPoly_BLAKE2s"
-    };
-    let mut builder = snow::Builder::new(pattern.parse()?)
+    let builder = snow::Builder::new("Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s".parse()?)
         .local_private_key(device.secret())?
-        .prologue(transcript)?;
-    if let Some(psk) = psk {
-        builder = builder.psk(3, psk)?;
-    } else {
-        builder = builder.remote_public_key(&peer.key)?;
-    }
+        .prologue(transcript)?
+        .psk(3, psk)?;
     let mut noise = if initiator {
         builder.build_initiator()?
     } else {

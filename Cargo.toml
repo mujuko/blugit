@@ -20,12 +20,14 @@ fs2 = "0.4"
 hex = "0.4"
 hostname = "0.4"
 rand = "0.8"
+russh = { version = "0.65.1", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snow = "0.10"
 spake2 = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "process", "sync", "time", "signal"] }
+tokio-util = "0.7"
 uuid = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }

@@ -6,8 +6,8 @@ use blugit::{
     platform::{Acceptor, Connection},
     protocol::{self, Code},
     server::{self, Host, Shutdown},
+    ssh,
     storage::{Device, ShareStore},
-    wire::{self, Kind},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, watch};
@@ -66,7 +66,7 @@ async fn stopping_cancels_pending_registration_without_waiting_three_minutes() -
 }
 
 #[tokio::test]
-async fn graceful_stop_allows_git_to_reach_exit_ack_and_completion() -> Result<()> {
+async fn graceful_stop_allows_git_to_reach_ssh_close_and_completion() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let repo = dir.path().join("repo.git");
     ensure!(
@@ -111,25 +111,32 @@ async fn graceful_stop_allows_git_to_reach_exit_ack_and_completion() -> Result<(
         .send(Box::new(a))
         .await
         .map_err(|_| anyhow::anyhow!("acceptor stopped"))?;
-    let mut client = protocol::connect(Box::new(b), &guest, &endpoint).await?;
-    wire::send(&mut client, Kind::Request, b"git-upload-pack").await?;
-    assert_eq!(wire::receive(&mut client).await?.0, Kind::Ready);
+    let client = ssh::connect(Box::new(b), &guest, &endpoint).await?;
+    let mut channel = client.exec("git-upload-pack").await?;
     stop_tx.send(Shutdown::Drain)?;
     tokio::task::yield_now().await;
     assert!(!running.is_finished(), "stop aborted a running Git session");
-    wire::send(&mut client, Kind::Eof, b"").await?;
+    channel.eof().await?;
     tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let (kind, _) = wire::receive(&mut client).await?;
-            if kind == Kind::Exit {
-                break;
+        let mut status = None;
+        let mut eof = false;
+        let mut closed = false;
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                russh::ChannelMsg::Eof => eof = true,
+                russh::ChannelMsg::Close => {
+                    closed = true;
+                    break;
+                }
+                _ => {}
             }
         }
-        wire::send(&mut client, Kind::Ack, b"").await?;
         ensure!(
-            wire::receive(&mut client).await? == (Kind::Complete, Vec::new()),
-            "final ACK was not confirmed"
+            status.is_some() && eof && closed,
+            "missing SSH exit status, EOF or close"
         );
+        client.finish().await?;
         Ok::<(), anyhow::Error>(())
     })
     .await??;

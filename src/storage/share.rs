@@ -205,6 +205,7 @@ mod tests {
         let peer = Peer {
             name: "Guest".into(),
             key: [1; 32],
+            ssh_key: [3; 32],
         };
         a.grant(&peer)?;
         assert!(a.member(&peer.key)?.is_some());
@@ -243,11 +244,13 @@ mod tests {
         a.grant(&Peer {
             name: "same".into(),
             key,
+            ssh_key: [3; 32],
         })?;
         key[31] = 2;
         a.grant(&Peer {
             name: "same".into(),
             key,
+            ssh_key: [3; 32],
         })?;
         assert!(a.revoke("01010101").is_err());
         assert_eq!(a.members()?.len(), 2);

@@ -1,12 +1,6 @@
-use crate::{
-    storage::Alias,
-    wire::{self, CHUNK, Kind},
-};
-use anyhow::{Context, Result, bail, ensure};
-use std::{
-    io::{Read, Write},
-    time::Duration,
-};
+use crate::{platform::CHUNK, storage::Alias};
+use anyhow::{Result, bail, ensure};
+use std::io::{Read, Write};
 
 pub async fn run() -> Result<u8> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -44,8 +38,8 @@ pub async fn run() -> Result<u8> {
                 output.write_all(b"connect\n\n")?;
                 output.flush()?;
             }
-            b"connect git-upload-pack" => return transfer(&name, b"git-upload-pack").await,
-            b"connect git-receive-pack" => return transfer(&name, b"git-receive-pack").await,
+            b"connect git-upload-pack" => return transfer(&name, "git-upload-pack").await,
+            b"connect git-receive-pack" => return transfer(&name, "git-receive-pack").await,
             b"" => return Ok(0),
             _ => bail!(
                 "unsupported helper command: {}",
@@ -55,28 +49,14 @@ pub async fn run() -> Result<u8> {
     }
 }
 
-async fn transfer(name: &Alias, service: &[u8]) -> Result<u8> {
-    let mut stream = crate::client::connect(name).await?;
-    wire::send(&mut stream, Kind::Request, service)
-        .await
-        .context("send initial REQUEST to host")?;
-    let (kind, data) = tokio::time::timeout(Duration::from_secs(15), wire::receive(&mut stream))
-        .await
-        .context("timed out waiting for READY")?
-        .context("receive READY from host")?;
-    if kind == Kind::Error {
-        bail!("{}", String::from_utf8_lossy(&data));
-    }
-    ensure!(
-        kind == Kind::Ready && data.is_empty(),
-        "invalid host response"
-    );
+async fn transfer(name: &Alias, service: &str) -> Result<u8> {
+    let session = crate::client::connect(name).await?;
+    let channel = session.exec(service).await?;
     std::io::stdout().write_all(b"\n")?;
     std::io::stdout().flush()?;
-
-    let (mut reader, mut writer) = tokio::io::split(stream);
+    let (mut reader, writer) = channel.split();
     let (sender, mut input) = tokio::sync::mpsc::channel::<std::io::Result<Vec<u8>>>(2);
-    // A detached OS thread exits with the process if Git keeps stdin open.
+    // A detached OS thread exits with the helper if Git keeps stdin open.
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin();
         loop {
@@ -95,57 +75,52 @@ async fn transfer(name: &Alias, service: &[u8]) -> Result<u8> {
             }
         }
     });
-    let (done_sender, mut done) = tokio::sync::oneshot::channel();
     let outgoing = async {
-        let mut input_open = true;
-        loop {
-            // Once a frame write starts, finish it before observing EXIT. An ACK
-            // must never interrupt the middle of a DATA frame on the stream.
-            tokio::select! {
-                _ = &mut done => break,
-                data = input.recv(), if input_open => {
-                    let data = data.ok_or_else(|| anyhow::anyhow!("stdin reader stopped"))??;
-                    input_open = !data.is_empty();
-                    wire::send(&mut writer, if input_open { Kind::Data } else { Kind::Eof }, &data).await?;
+        while let Some(data) = input.recv().await {
+            let data = data?;
+            if data.is_empty() {
+                writer.eof().await?;
+                break;
+            }
+            writer.data(data.as_slice()).await?;
+        }
+        std::future::pending::<Result<()>>().await
+    };
+    let incoming = async {
+        let mut status = None;
+        let mut eof = false;
+        while let Some(message) = reader.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } => {
+                    let mut output = std::io::stdout().lock();
+                    output.write_all(&data)?;
+                    output.flush()?;
                 }
+                russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                    let mut output = std::io::stderr().lock();
+                    output.write_all(&data)?;
+                    output.flush()?;
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    ensure!(status.is_none(), "duplicate SSH exit status");
+                    status = Some(exit_status);
+                }
+                russh::ChannelMsg::Eof => eof = true,
+                russh::ChannelMsg::ExitSignal { .. } => bail!("remote Git terminated by a signal"),
+                russh::ChannelMsg::Close if eof && status.is_some() => return Ok(status.unwrap()),
+                russh::ChannelMsg::Close => {
+                    bail!("SSH channel closed before Git exit status and EOF")
+                }
+                _ => {}
             }
         }
-        wire::send(&mut writer, Kind::Ack, b"").await?;
-        Ok::<_, anyhow::Error>(())
+        bail!("SSH disconnected before Git completed")
     };
-    let incoming = async move {
-        let mut done_sender = Some(done_sender);
-        let mut exit_code = None;
-        loop {
-            let (kind, data) = wire::receive(&mut reader)
-                .await
-                .context("receive Git output/EXIT from host")?;
-            match kind {
-                Kind::Data if exit_code.is_none() => {
-                    let mut stdout = std::io::stdout().lock();
-                    stdout.write_all(&data)?;
-                    stdout.flush()?;
-                }
-                Kind::Stderr | Kind::Error => {
-                    let mut stderr = std::io::stderr().lock();
-                    stderr.write_all(&data)?;
-                    stderr.flush()?;
-                    if kind == Kind::Error {
-                        bail!("host reported an error");
-                    }
-                }
-                Kind::Exit if exit_code.is_none() => {
-                    let code: i32 = std::str::from_utf8(&data)?.parse()?;
-                    let _ = done_sender.take().unwrap().send(());
-                    exit_code = Some(u8::from(code != 0));
-                }
-                Kind::Complete if data.is_empty() && exit_code.is_some() => {
-                    return Ok::<_, anyhow::Error>(exit_code.unwrap());
-                }
-                _ => bail!("unexpected host frame"),
-            }
-        }
+    tokio::pin!(outgoing, incoming);
+    let status = tokio::select! {
+        result = &mut outgoing => { result?; unreachable!() },
+        result = &mut incoming => result?,
     };
-    let (code, ()) = tokio::try_join!(incoming, outgoing)?;
-    Ok(code)
+    session.finish().await?;
+    Ok(u8::from(status != 0))
 }

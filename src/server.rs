@@ -1,6 +1,5 @@
 //! Bounded session management and graceful stop; no CLI or OS signal handling.
 use crate::{
-    git,
     platform::{Acceptor, Connection},
     protocol,
     storage::{Device, ShareStore},
@@ -17,12 +16,14 @@ pub enum Shutdown {
 }
 pub struct Host {
     auth: protocol::Server,
+    device: Device,
     share: ShareStore,
 }
 impl Host {
     pub fn new(device: Device, share: ShareStore, notify: protocol::Notify) -> Self {
         Self {
-            auth: protocol::Server::new(device, share.clone(), notify),
+            auth: protocol::Server::new(device.clone(), share.clone(), notify),
+            device,
             share,
         }
     }
@@ -34,23 +35,22 @@ impl Host {
         if *shutdown.borrow() != Shutdown::Running {
             return Ok(());
         }
-        let session = tokio::select! {
+        use tokio::io::AsyncBufReadExt;
+        let mut stream = tokio::io::BufReader::new(stream);
+        let ssh = tokio::select! {
             biased;
             _=shutdown.changed()=>return Ok(()),
-            result=self.auth.accept(stream)=>result?,
-        };
-        if let Some(session) = session {
-            if *shutdown.borrow() != Shutdown::Running {
-                return Ok(());
+            result=tokio::time::timeout(std::time::Duration::from_secs(15), stream.fill_buf())=> {
+                result.context("initial protocol identification timed out")??.starts_with(b"S")
             }
-            eprintln!(
-                "Authenticated device={:?} id={}",
-                session.peer.name,
-                session.peer.short_id()
-            );
-            git::serve(session.stream, self.share.repository())
-                .await
-                .context("authenticated Git transfer")?;
+        };
+        if ssh {
+            crate::ssh::serve(Box::new(stream), &self.device, self.share.clone(), shutdown).await?;
+        } else {
+            tokio::select! {
+                _=shutdown.changed()=>return Ok(()),
+                result=self.auth.accept(Box::new(stream))=>result?,
+            }
         }
         Ok(())
     }

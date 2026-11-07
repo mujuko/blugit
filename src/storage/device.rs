@@ -17,6 +17,7 @@ struct Record {
     #[zeroize(skip)]
     peer: Peer,
     secret: [u8; 32],
+    ssh_secret: [u8; 32],
 }
 #[derive(Clone)]
 pub struct Device {
@@ -32,7 +33,7 @@ impl Device {
         Ok(dirs::data_local_dir()
             .context("no user data directory; set BLUGIT_HOME")?
             .join("blugit")
-            .join("v1"))
+            .join("v2"))
     }
     pub fn open(root: PathBuf, name: Option<String>) -> Result<Self> {
         atomic::private_dir(&root)?;
@@ -47,8 +48,10 @@ impl Device {
                 OsRng.fill_bytes(&mut secret);
                 let key = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
                     .to_bytes();
+                let mut ssh_secret = [0; 32];
+                OsRng.fill_bytes(&mut ssh_secret);
                 Record {
-                    schema: 1,
+                    schema: 2,
                     peer: Peer {
                         name: name.clone().unwrap_or_else(|| {
                             hostname::get()
@@ -56,18 +59,25 @@ impl Device {
                                 .unwrap_or_else(|_| "PC".into())
                         }),
                         key,
+                        ssh_key: ssh_public(&ssh_secret),
                     },
                     secret,
+                    ssh_secret,
                 }
             }
         };
-        ensure!(record.schema == 1, "unsupported identity schema");
+        ensure!(record.schema == 2, "unsupported identity schema");
         ensure!(record.secret != [0; 32], "invalid private key");
         ensure!(
             x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(record.secret))
                 .to_bytes()
                 == record.peer.key,
             "identity public/private keys do not match; restore the identity instead of regenerating it"
+        );
+        ensure!(record.ssh_secret != [0; 32], "invalid SSH private key");
+        ensure!(
+            record.peer.ssh_key == ssh_public(&record.ssh_secret),
+            "SSH public/private keys do not match; restore the identity instead of regenerating it"
         );
         if let Some(name) = name {
             record.peer.name = name;
@@ -90,9 +100,20 @@ impl Device {
     pub(crate) fn secret(&self) -> &[u8; 32] {
         &self.record.secret
     }
+    pub(crate) fn ssh_private_key(&self) -> russh::keys::PrivateKey {
+        russh::keys::PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from_seed(
+            &self.record.ssh_secret,
+        ))
+    }
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+fn ssh_public(seed: &[u8; 32]) -> [u8; 32] {
+    russh::keys::ssh_key::private::Ed25519Keypair::from_seed(seed)
+        .public
+        .0
 }
 
 #[cfg(test)]
@@ -103,6 +124,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let d = Device::open(dir.path().into(), Some("A".into()))?;
         let key = d.peer().key;
+        let ssh_key = d.peer().ssh_key;
         assert_eq!(
             Device::open(dir.path().into(), Some("B".into()))?
                 .peer()
@@ -110,6 +132,11 @@ mod tests {
             key
         );
         assert_eq!(Device::open(dir.path().into(), None)?.peer().name, "B");
+        assert_eq!(
+            Device::open(dir.path().into(), None)?.peer().ssh_key,
+            ssh_key
+        );
+        assert_ne!(key, ssh_key);
         Ok(())
     }
     #[test]
@@ -118,6 +145,11 @@ mod tests {
         Device::open(dir.path().into(), None)?;
         let path = dir.path().join("identity.json");
         let mut value: serde_json::Value = atomic::read(&path)?.unwrap();
+        let original = value.clone();
+        value["peer"]["ssh_key"] = serde_json::to_value([1u8; 32])?;
+        atomic::write(&path, &value)?;
+        assert!(Device::open(dir.path().into(), None).is_err());
+        value = original;
         value["peer"]["key"] = serde_json::to_value([1u8; 32])?;
         atomic::write(&path, &value)?;
         assert!(Device::open(dir.path().into(), None).is_err());

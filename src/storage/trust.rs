@@ -66,6 +66,7 @@ mod tests {
         let peer = Peer {
             name: "Host".into(),
             key: [1; 32],
+            ssh_key: [3; 32],
         };
         store.pin(&e, &peer)?;
         assert_eq!(store.host(&e)?, Some(peer));

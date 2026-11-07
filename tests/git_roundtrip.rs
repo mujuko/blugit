@@ -307,7 +307,8 @@ fn restart_revocation_and_repository_switch_preserve_boundaries() {
     );
     let wrong = h.git(&h.root.join("work"), &[OsStr::new("fetch")]);
     assert!(!wrong.status.success());
-    assert!(String::from_utf8_lossy(&wrong.stderr).contains("share ID does not match"));
+    // The new share has no enrollment for this guest: SSH refuses it before exec.
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("not registered"));
     let new_share = h.git(
         &h.root,
         &[
@@ -342,7 +343,8 @@ fn clone_push_pull_binary_rejection_and_rebase() {
     let first = harness.root.join("guest one");
     let second = harness.root.join("guest two");
     let mut state = 0x11223344u32;
-    let binary: Vec<_> = (0..262144)
+    // Exceed SSH's initial 2 MiB window to exercise flow control in both directions.
+    let binary: Vec<_> = (0..3 * 1024 * 1024)
         .map(|_| {
             state ^= state << 13;
             state ^= state >> 17;

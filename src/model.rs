@@ -55,6 +55,7 @@ impl From<ShareId> for String {
 pub struct Peer {
     pub name: String,
     pub key: [u8; 32],
+    pub ssh_key: [u8; 32],
 }
 impl Peer {
     pub fn validate(&self) -> Result<()> {
@@ -65,6 +66,7 @@ impl Peer {
             "device name must be 1..128 bytes without control characters"
         );
         ensure!(self.key != [0; 32], "invalid device public key");
+        ensure!(self.ssh_key != [0; 32], "invalid SSH public key");
         Ok(())
     }
     pub fn id(&self) -> String {
@@ -101,17 +103,20 @@ mod tests {
         let a = Peer {
             name: "PC".into(),
             key: [1; 32],
+            ssh_key: [3; 32],
         };
         let b = Peer {
             name: "PC".into(),
             key: [2; 32],
+            ssh_key: [3; 32],
         };
         assert_ne!(a.id(), b.id());
         for name in ["", "  ", "PC\nforged", "\u{1b}[31m"] {
             assert!(
                 Peer {
                     name: name.into(),
-                    key: [1; 32]
+                    key: [1; 32],
+                    ssh_key: [3; 32]
                 }
                 .validate()
                 .is_err()

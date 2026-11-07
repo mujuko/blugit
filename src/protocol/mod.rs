@@ -1,4 +1,4 @@
-//! Authentication is independent of the radio, CLI, Git and local member-management commands.
+//! One-time code enrollment binds device and SSH keys; Git connections use SSH.
 mod code;
 mod enrollment;
 mod framing;
@@ -17,7 +17,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 pub use code::Code;
-use messages::{Access, MAGIC, Operation, Reply, Request, Response};
+use messages::{MAGIC, Operation, Reply, Request, Response};
 use rand::{RngCore, rngs::OsRng};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{
@@ -32,10 +32,7 @@ pub struct EnrollmentNotice {
     pub code: Code,
 }
 pub type Notify = Arc<dyn Fn(EnrollmentNotice) + Send + Sync>;
-pub struct Session {
-    pub peer: Peer,
-    pub stream: Connection,
-}
+
 pub struct Server {
     device: Device,
     share: ShareStore,
@@ -52,11 +49,11 @@ impl Server {
             notify,
         }
     }
-    pub async fn accept(&self, mut stream: Connection) -> Result<Option<Session>> {
+    pub async fn accept(&self, mut stream: Connection) -> Result<()> {
         let request: Request = timeout(HANDSHAKE_TIMEOUT, async {
             let mut magic = vec![0; MAGIC.len()];
             stream.read_exact(&mut magic).await?;
-            ensure!(magic == MAGIC, "expected authenticated blugit v1 protocol");
+            ensure!(magic == MAGIC, "expected blugit v2 enrollment protocol");
             framing::receive_json(&mut stream).await
         })
         .await
@@ -65,10 +62,6 @@ impl Server {
         if request.share.is_some_and(|id| id != self.share.id()) {
             reject(&mut stream, "share ID does not match the hosted repository").await?;
             bail!("wrong repository requested");
-        }
-        if matches!(request.operation, Operation::Connect) && request.share.is_none() {
-            reject(&mut stream, "Git connection requires a registered share ID").await?;
-            bail!("missing repository ID");
         }
         let mut nonce = [0; 16];
         OsRng.fill_bytes(&mut nonce);
@@ -116,44 +109,10 @@ impl Server {
                         "device registered, but registration acknowledgement missing"
                     );
                     framing::send(&mut secure, enrollment::DONE).await?;
-                    Ok(None)
+                    Ok(())
                 })
                 .await
                 .context("registration expired; request a new code")?
-            }
-            Operation::Connect => {
-                if self.share.member(&request.peer.key)?.is_none() {
-                    reject(
-                        &mut stream,
-                        "device is not registered for this repository; run blugit join",
-                    )
-                    .await?;
-                    bail!("unregistered device");
-                }
-                timeout(HANDSHAKE_TIMEOUT, async {
-                    framing::send_json(&mut stream, &Response::Ready { reply }).await?;
-                    let mut secure = handshake::exchange(
-                        stream,
-                        &self.device,
-                        &request.peer,
-                        &transcript,
-                        None,
-                        false,
-                    )
-                    .await?;
-                    // Revocation during the key exchange must not open a new Git session.
-                    if self.share.member(&request.peer.key)?.is_none() {
-                        framing::send_json(&mut secure, &Access::Denied).await?;
-                        bail!("device was revoked during authentication");
-                    }
-                    framing::send_json(&mut secure, &Access::Granted).await?;
-                    Ok(Some(Session {
-                        peer: request.peer,
-                        stream: secure,
-                    }))
-                })
-                .await
-                .context("device authentication timed out")?
             }
         }
     }
@@ -260,36 +219,4 @@ where
     })
     .await
     .context("registration expired")?
-}
-
-pub async fn connect(
-    mut stream: Connection,
-    device: &Device,
-    endpoint: &Endpoint,
-) -> Result<Connection> {
-    let host = TrustStore::new(device.root().into())
-        .host(endpoint)?
-        .context("repository not registered; run blugit join first")?;
-    timeout(HANDSHAKE_TIMEOUT, async {
-        let request_ = Request {
-            operation: Operation::Connect,
-            share: Some(endpoint.share),
-            peer: device.peer().clone(),
-        };
-        request(&mut stream, &request_).await?;
-        let reply = reply(&mut stream, Some(endpoint.share)).await?;
-        ensure!(
-            reply.host.key == host.key,
-            "host key changed; verify the host in person and register again"
-        );
-        let transcript = messages::transcript(&request_, &reply)?;
-        let mut secure =
-            handshake::exchange(stream, device, &host, &transcript, None, true).await?;
-        match framing::receive_json(&mut secure).await? {
-            Access::Granted => Ok(secure),
-            Access::Denied => bail!("access to this repository was revoked"),
-        }
-    })
-    .await
-    .context("device authentication timed out")?
 }

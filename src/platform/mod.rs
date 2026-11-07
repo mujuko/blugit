@@ -6,6 +6,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 pub type Connection = Box<dyn Stream>;
+pub const CHUNK: usize = 32768;
 pub const SERVICE: uuid::Uuid = uuid::Uuid::from_u128(0x86b63824106648f5a694fd5ba0f90ed5);
 #[cfg(windows)]
 mod windows;

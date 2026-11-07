@@ -38,7 +38,7 @@ impl BluetoothStream {
         let (send, input) = async_mpsc::channel(2);
         std::thread::spawn(move || {
             loop {
-                let mut bytes = vec![0; crate::wire::CHUNK];
+                let mut bytes = vec![0; crate::platform::CHUNK];
                 let result = match reader.read(&mut bytes) {
                     Ok(count) => {
                         bytes.truncate(count);
@@ -132,7 +132,7 @@ impl AsyncWrite for BluetoothStream {
             if bytes.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            let count = bytes.len().min(crate::wire::CHUNK);
+            let count = bytes.len().min(crate::platform::CHUNK);
             let (complete, pending) = oneshot::channel();
             // At most one job is ever outstanding: subsequent polls wait for its
             // completion, so the unbounded std channel cannot grow without bound.
