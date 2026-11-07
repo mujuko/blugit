@@ -11,9 +11,9 @@
 |---|---|
 | Windows：単体53件、Git統合6件、ライフサイクル2件 | 全61件成功 |
 | Windows：fmt、Clippy（全ターゲット・全機能）、通常のreleaseビルド | 成功 |
-| macOS：番号予約・補助プロセス監視を含む単体・統合テスト | 全64件成功。以後の信号分離修正を含む最終結果は確認中 |
-| macOS：fmt、Clippy、通常のreleaseビルド | 成功。以後の最終修正は再確認中 |
-| Linux | 未確認。Windowsからのcross-checkはD-Busのビルド環境不足で停止 |
+| macOS：番号予約・補助プロセス監視・実SIGINTを含む単体・統合テスト | 全66件成功。以後の補助プロセス分離修正は確認中 |
+| macOS：fmt、Clippy、通常のreleaseビルド | 成功。以後の補助プロセス分離修正は再確認中 |
+| Linux（GitHub Actions）：単体52件、Git統合7件、ライフサイクル2件、fmt・Clippy・release | 全61件成功、各チェック成功 |
 
 テスト用機能ではBluetoothをインメモリ／ループバックのストリームへ差し替える。
 Git統合テストはCLI、Remote Helper、SSHクライアント／サーバー、Git子プロセスを実行し、3 MiBのバイナリ転送も含む。
@@ -37,7 +37,8 @@ cargo build --release --locked
 ```
 
 OpenSSH相互運用は `ssh` が未導入の場合のみスキップする。
-CIにはWindows／macOS／Linux向けジョブを設定しているが、この記録は手元で確認した結果であり、CIの全OS成功を意味しない。
+[main `af0663f` のCI](https://github.com/mujuko/blugit/actions/runs/42421510829)でもWindowsの全61件、macOSの全66件、Linuxの全61件と、各OSのfmt・Clippy・releaseビルドが成功した。
+Linuxの実Bluetooth検証は未実施である。
 
 ## Windowsホスト／Macゲストの実Bluetooth検証
 
@@ -78,7 +79,9 @@ Windowsでは、実際のCLI・SSH・Git・待機中の受信hookを使い、ネ
 ### Macからの再接続で初期化待ち
 
 Windowsの検証ホストを番号5で再起動した後、Macの再接続が期限切れになる試行があった。
-Mac補助プロセスのサンプルでは、RFCOMM接続呼出しより前の `WaitForBluetooth` に停止位置を特定した。原因調査中。
+Mac補助プロセスのサンプルでは、RFCOMM接続呼出しより前の `WaitForBluetooth` に停止位置を特定した。
+ローカルアドレス取得でも再現し、電源ONのままTCCにコード要件の不一致と許可プロンプトの保留を示すログがあった。
+Rust本体を補助アプリへコピーする方式ではRust側の更新でも許可対象のコードが変わるため、専用の小さな実行ファイルへ分離する修正を進めている。
 そのため、この再接続を前提とするBluetooth経由のCtrl+C再試験は未完了。
 
 ## 逆方向と残る実機確認
@@ -93,7 +96,7 @@ Macで番号の解放・再確保は確認しているが、その後のGit再�
 | 修正後のBluetooth転送中のCtrl+C | 1回目で転送と末尾出力が完了してから終了し、2回目で中断する |
 | Macホスト／Windowsゲスト | バイナリpush・pullと再接続、ハッシュ・コミット・fsckの一致 |
 | 実機でのrevoke・共有切替 | 新規接続を拒否し、既存の登録とGitデータを保持する（自動テストは成功） |
-| Linux | ビルド・自動テスト、実アダプターで割当・登録・Git転送 |
+| Linux | 実アダプターで割当・登録・Git転送（CIでのビルド・自動テストは成功） |
 | ネットワークを切った環境 | Wi-Fi／Ethernetなしで同じ登録・Git操作が完了する |
 
 今回の遠隔共同検証では制御用ネットワークを維持したため、完全なネットワーク切断試験は実施していない。
