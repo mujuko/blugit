@@ -17,7 +17,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader, ReadBuf};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 
 unsafe extern "C" {
     fn blugit_macos_main(argc: i32, argv: *const *const libc::c_char) -> i32;
