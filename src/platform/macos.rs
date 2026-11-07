@@ -192,7 +192,7 @@ pub struct Listener {
     socket: tokio::net::UnixListener,
     process: std::sync::Arc<Process>,
     directory: std::sync::Arc<tempfile::TempDir>,
-    _output: BufReader<tokio::net::UnixStream>,
+    output: BufReader<tokio::net::UnixStream>,
 }
 
 pub async fn listen(channel: Option<Channel>) -> Result<Listener> {
@@ -219,13 +219,33 @@ pub async fn listen(channel: Option<Channel>) -> Result<Listener> {
         socket,
         process: std::sync::Arc::new(process),
         directory,
-        _output: output,
+        output,
     })
+}
+
+async fn accept_stream(
+    socket: &tokio::net::UnixListener,
+    output: &mut BufReader<tokio::net::UnixStream>,
+) -> Result<tokio::net::UnixStream> {
+    let mut message = String::new();
+    tokio::select! {
+        biased;
+        result = output.read_line(&mut message) => {
+            let length = result?;
+            ensure!(length > 0, "Bluetooth helper exited while listening");
+            ensure!(length < 4096, "invalid Bluetooth helper response while listening");
+            if let Some(error) = message.trim_end().strip_prefix("ERROR\t") {
+                bail!("Bluetooth helper: {error}");
+            }
+            bail!("unexpected Bluetooth helper response while listening: {}", message.trim_end());
+        }
+        result = socket.accept() => Ok(result?.0),
+    }
 }
 
 impl Listener {
     pub async fn accept(&mut self) -> Result<Connection> {
-        let (socket, _) = self.socket.accept().await?;
+        let socket = accept_stream(&self.socket, &mut self.output).await?;
         Ok(Box::new(Bridge {
             socket,
             _control: None,
@@ -269,12 +289,119 @@ mod tests {
     use std::{
         io::{self, Read, Write},
         net::Shutdown,
-        os::{fd::AsRawFd, unix::net::UnixStream},
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{ffi::OsStrExt, net::UnixStream},
+        },
+        path::Path,
+        process::Command,
         time::Duration,
     };
+    use tokio::io::AsyncWriteExt;
 
     unsafe extern "C" {
         fn blugit_test_dispatch_read(fd: i32, buffer: *mut u8, size: usize) -> isize;
+        fn blugit_test_reserve_channel(
+            directory: *const libc::c_char,
+            requested: i32,
+            selected: *mut i32,
+        ) -> i32;
+    }
+
+    fn reserve(directory: &Path, requested: i32) -> io::Result<(OwnedFd, i32)> {
+        let directory = std::ffi::CString::new(directory.as_os_str().as_bytes())?;
+        let mut selected = 0;
+        // SAFETY: the directory and output pointer remain live during the call.
+        let fd =
+            unsafe { blugit_test_reserve_channel(directory.as_ptr(), requested, &mut selected) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the native allocator transfers this newly opened fd to us.
+        Ok((unsafe { OwnedFd::from_raw_fd(fd) }, selected))
+    }
+
+    #[test]
+    fn channel_reservations_reject_conflicts_in_another_process_and_release_on_close()
+    -> io::Result<()> {
+        const CHILD_DIRECTORY: &str = "BLUGIT_TEST_CHANNEL_RESERVATION_DIRECTORY";
+        if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+            assert_eq!(
+                reserve(Path::new(&directory), 4)
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EADDRINUSE)
+            );
+            return Ok(());
+        }
+        let directory = tempfile::tempdir()?;
+        let (owner, selected) = reserve(directory.path(), 4)?;
+        assert_eq!(selected, 4);
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "platform::macos::tests::channel_reservations_reject_conflicts_in_another_process_and_release_on_close",
+            ])
+            .env(CHILD_DIRECTORY, directory.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        assert_eq!(
+            reserve(directory.path(), 4).unwrap_err().raw_os_error(),
+            Some(libc::EADDRINUSE)
+        );
+        drop(owner);
+        assert_eq!(reserve(directory.path(), 4)?.1, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_channel_reservations_are_distinct_and_report_exhaustion() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut owners = Vec::new();
+        for expected in 1..=30 {
+            let (owner, selected) = reserve(directory.path(), 0)?;
+            assert_eq!(selected, expected);
+            owners.push(owner);
+        }
+        assert_eq!(
+            reserve(directory.path(), 0).unwrap_err().raw_os_error(),
+            Some(libc::EADDRINUSE)
+        );
+        drop(owners.remove(6));
+        assert_eq!(reserve(directory.path(), 0)?.1, 7);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listener_reports_native_failure_and_exit_instead_of_waiting_forever()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let listener = tokio::net::UnixListener::bind(directory.path().join("listener"))?;
+        for notification in [Some("ERROR\tBluetooth stopped\n"), None] {
+            let (reader, mut helper) = tokio::net::UnixStream::pair()?;
+            let mut output = tokio::io::BufReader::new(reader);
+            if let Some(notification) = notification {
+                helper.write_all(notification.as_bytes()).await?;
+            }
+            drop(helper);
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                super::accept_stream(&listener, &mut output),
+            )
+            .await?
+            .unwrap_err();
+            assert!(error.to_string().contains(if notification.is_some() {
+                "Bluetooth stopped"
+            } else {
+                "helper exited"
+            }));
+        }
+        Ok(())
     }
 
     #[test]

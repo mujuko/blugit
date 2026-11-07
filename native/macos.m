@@ -8,9 +8,11 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -23,6 +25,40 @@ static BOOL ParentGone = NO;
 static IOBluetoothSDPServiceRecord *PublishedRecord;
 static IOBluetoothUserNotification *PublishedNotification;
 static dispatch_source_t TerminationSource;
+
+// IOBluetooth can return the requested channel even when another blugit
+// process has already published it. Keep this lock in the native owner, not
+// the state directory or Rust parent: listener shutdown may still be draining
+// bridges, and a helper from another binary version shares the same adapter.
+static int ChannelReservation = -1;
+
+static void ReleaseReservation(void) {
+    if (ChannelReservation >= 0) close(ChannelReservation);
+    ChannelReservation = -1;
+}
+
+static int ReserveChannel(const char *directory, int requested, int first, int *selected) {
+    if (requested < 0 || requested > 30 || first < 1 || first > 30) { errno = EINVAL; return -1; }
+    for (int channel = requested ? requested : first; channel <= (requested ? requested : 30); ++channel) {
+        char path[PATH_MAX];
+        int length = snprintf(path, sizeof(path), "%s/channel-%d.lock", directory, channel);
+        if (length < 0 || (size_t)length >= sizeof(path)) { errno = ENAMETOOLONG; return -1; }
+        int fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd < 0) return -1;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) { *selected = channel; return fd; }
+        int error = errno;
+        close(fd);
+        if (error != EWOULDBLOCK && error != EAGAIN) { errno = error; return -1; }
+    }
+    errno = EADDRINUSE;
+    return -1;
+}
+
+#ifdef BLUGIT_TEST_TRANSPORT
+int blugit_test_reserve_channel(const char *directory, int requested, int *selected) {
+    return ReserveChannel(directory, requested, 1, selected);
+}
+#endif
 
 static void ReleaseService(void) {
     [PublishedNotification unregister]; PublishedNotification = nil;
@@ -156,6 +192,7 @@ static CBCentralManager *WaitForBluetooth(void) {
     // Retain the delegate because CBCentralManager's delegate property is weak.
     static PowerDelegate *retained;
     retained = delegate;
+    (void)retained;
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:55];
     while (manager.state == CBManagerStateUnknown || manager.state == CBManagerStateResetting || CBManager.authorization == CBManagerAuthorizationNotDetermined) {
         if (deadline.timeIntervalSinceNow <= 0) Fail(@"Bluetooth initialization timed out");
@@ -356,18 +393,30 @@ int blugit_macos_main(int argc, const char **argv) {
             MonitorParent();
             __attribute__((objc_precise_lifetime)) Listener *listener = [Listener new];
             listener.path = @(argv[1]);
-            // IOBluetooth assigns an alternate free channel when the hint is in
-            // use. For automatic mode, accept that assignment; for an explicit
-            // request, require an exact match. Subscribe on the actual channel.
-            PublishedRecord = [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:ServiceRecord(requested ? requested : 1)];
-            if (!PublishedRecord) { ReleaseService(); Fail(@"Cannot allocate an RFCOMM channel"); }
+            // The reservation namespace is independent of BLUGIT_HOME and the
+            // helper binary cache. Never unlink its files: an existing inode
+            // may still be locked by another process.
+            NSString *directory = [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/blugit/channels"] stringByAppendingPathComponent:address];
+            NSError *directoryError = nil;
+            if (![[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:&directoryError]) {
+                Fail([NSString stringWithFormat:@"Cannot create RFCOMM reservation directory: %@", directoryError.localizedDescription]);
+            }
             BluetoothRFCOMMChannelID reserved = 0;
-            if ([PublishedRecord getRFCOMMChannelID:&reserved] != kIOReturnSuccess || reserved < 1 || reserved > 30) {
-                ReleaseService(); Fail(@"macOS returned an invalid RFCOMM channel");
+            for (int first = 1; first <= 30;) {
+                int candidate = 0;
+                int reservation = ReserveChannel(directory.fileSystemRepresentation, requested, first, &candidate);
+                if (reservation < 0) {
+                    if (errno == EADDRINUSE) Fail(requested ? @"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation" : @"No free RFCOMM channel is available");
+                    Fail([NSString stringWithFormat:@"Cannot reserve RFCOMM channel: %s", strerror(errno)]);
+                }
+                PublishedRecord = [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:ServiceRecord(candidate)];
+                BOOL valid = PublishedRecord && [PublishedRecord getRFCOMMChannelID:&reserved] == kIOReturnSuccess && reserved == candidate;
+                if (valid) { ChannelReservation = reservation; atexit(ReleaseReservation); break; }
+                ReleaseService(); close(reservation);
+                if (requested) Fail(@"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation");
+                first = candidate + 1;
             }
-            if (requested && reserved != requested) {
-                ReleaseService(); Fail(@"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation");
-            }
+            if (!PublishedRecord) Fail(@"Cannot allocate a free RFCOMM channel");
             PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
             if (!PublishedNotification) { ReleaseService(); Fail(@"Cannot listen on allocated RFCOMM channel"); }
             printf("READY\t%s\t%d\n", address.UTF8String, reserved);
