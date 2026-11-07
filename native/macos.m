@@ -160,7 +160,10 @@ int blugit_spawn(const char *executable, char *const *arguments, int output, pid
     // bundled child can then request Bluetooth permission under its own name.
     void (*disclaim)(posix_spawnattr_t *, int) = dlsym(RTLD_DEFAULT, "responsibility_spawnattrs_setdisclaim");
     if (disclaim) disclaim(&attributes, 1);
-    if (!error) error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    // A terminal's Ctrl+C belongs to the Rust CLI. It decides when established
+    // transfers have drained before terminating this Bluetooth owner.
+    if (!error) error = posix_spawnattr_setpgroup(&attributes, 0);
+    if (!error) error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP);
     if (!error) error = posix_spawn_file_actions_adddup2(&actions, output, STDOUT_FILENO);
     if (!error) error = posix_spawn_file_actions_adddup2(&actions, STDERR_FILENO, STDERR_FILENO);
     if (!error) error = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);

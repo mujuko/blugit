@@ -405,6 +405,40 @@ mod tests {
     }
 
     #[test]
+    fn native_helper_is_separate_from_the_terminal_signal_group() -> io::Result<()> {
+        let (_reader, output) = UnixStream::pair()?;
+        let mut arguments = [
+            c"/bin/sleep".as_ptr().cast_mut(),
+            c"30".as_ptr().cast_mut(),
+            std::ptr::null_mut(),
+        ];
+        let mut pid = 0;
+        // SAFETY: argv is null-terminated, and the socket and C strings survive spawn.
+        let error = unsafe {
+            super::blugit_spawn(
+                c"/bin/sleep".as_ptr(),
+                arguments.as_mut_ptr(),
+                output.as_raw_fd(),
+                &mut pid,
+            )
+        };
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        let _child = super::Process { pid };
+        // SAFETY: this pid belongs to the child kept alive by the process guard.
+        let child_group = unsafe { libc::getpgid(pid) };
+        // SAFETY: getpgrp reads this process's signal group.
+        let parent_group = unsafe { libc::getpgrp() };
+        assert_eq!(child_group, pid, "the helper must own its signal group");
+        assert_ne!(
+            child_group, parent_group,
+            "terminal Ctrl+C must reach the Rust CLI only"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn dispatch_io_nonblocking_duplicate_waits_for_delayed_data() -> io::Result<()> {
         let (reader, mut peer) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(5)))?;
