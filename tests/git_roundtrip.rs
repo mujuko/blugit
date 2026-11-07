@@ -19,15 +19,20 @@ struct RunningHost {
 }
 impl RunningHost {
     fn start(repository: &Path, state: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_blugit"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_blugit"));
+        command
             .arg("--state-dir")
             .arg(state)
             .arg("__test-host")
             .arg(repository)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
         let stderr = child.stderr.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (code_tx, codes) = mpsc::channel();
@@ -457,4 +462,82 @@ fn moved_channel_is_authenticated_and_cached_without_reenrollment() {
     assert!(String::from_utf8_lossy(&denied.stderr).contains("host key changed"));
     assert_eq!(fs::read(&alias_path).unwrap(), saved_alias);
     assert_eq!(fs::read(&trust_path).unwrap(), pinned);
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_c_drains_git_instead_of_interrupting_its_receive_hook() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+    let mut h = Harness::new();
+    h.join();
+    h.ok(&h.root, &["clone", "blugit://demo", "signal-work"]);
+    let work = h.root.join("signal-work");
+    fs::write(
+        work.join("marker"),
+        b"transfer remains active through Ctrl+C\n",
+    )
+    .unwrap();
+    h.ok(&work, &["add", "marker"]);
+    h.ok(&work, &["commit", "-m", "test Ctrl+C drain"]);
+    let entered = h.root.join("hook.entered");
+    let release = h.root.join("hook.release");
+    let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "'\\''"));
+    let hook = h.repository.join("hooks/pre-receive");
+    fs::write(&hook, format!("#!/bin/sh\nprintf entered > {}\nn=0\nwhile [ ! -f {} ] && [ $n -lt 500 ]; do n=$((n+1)); sleep 0.01; done\n[ -f {} ] || exit 1\nprintf 'drain-output-after-stop\\n' >&2\n", quote(&entered), quote(&release), quote(&release))).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    let pushing = Command::new("git")
+        .current_dir(&work)
+        .args(["push", "origin", "HEAD:refs/heads/main"])
+        .env("PATH", &h.helper_path)
+        .env("BLUGIT_HOME", &h.guest_state)
+        .env("BLUGIT_TEST_ADDR", &h.host.address)
+        .env(
+            "BLUGIT_TEST_ROUTES",
+            serde_json::json!({"7":h.host.address}).to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let reached_hook = entered.exists();
+    let host_pid = h.host.child.id() as libc::pid_t;
+    // SAFETY: the test spawned this host in its own group. The parent/test runner
+    // and push client are outside that group. Deliver the real terminal signal.
+    let signalled = reached_hook
+        && unsafe {
+            libc::getpgid(host_pid) == host_pid && libc::kill(-host_pid, libc::SIGINT) == 0
+        };
+    std::thread::sleep(Duration::from_millis(150));
+    let draining = h.host.child.try_wait().unwrap().is_none();
+    fs::write(
+        &release,
+        b"finish Git after host stopped accepting connections",
+    )
+    .unwrap();
+    let output = pushing.wait_with_output().unwrap();
+    assert!(
+        reached_hook && signalled,
+        "Git did not reach the signal checkpoint"
+    );
+    assert!(
+        draining,
+        "Ctrl+C interrupted Git instead of waiting for the active transfer"
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("drain-output-after-stop"));
+    assert!(h.host.child.wait().unwrap().success());
+    assert_eq!(
+        h.ok(&work, &["rev-parse", "HEAD"]),
+        h.ok(&h.repository, &["rev-parse", "main"])
+    );
 }

@@ -49,7 +49,14 @@ pub(crate) fn parse_exec(command: &[u8], share: ShareId) -> Option<&'static str>
 }
 
 pub(crate) fn spawn(service: &str, repository: &Path) -> Result<Child> {
-    git_command()
+    let mut command = git_command();
+    // Ctrl+C belongs to the host's drain/abort policy. Letting the terminal
+    // broadcast it to Git (and its hooks) would interrupt an authorized transfer.
+    #[cfg(windows)]
+    command.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    #[cfg(unix)]
+    command.process_group(0);
+    command
         .arg(service)
         .arg(repository)
         .stdin(Stdio::piped())
