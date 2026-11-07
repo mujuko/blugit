@@ -14,23 +14,38 @@ pub async fn connect(name: &Alias) -> Result<crate::ssh::Session> {
     connect_named(&device, name).await
 }
 pub async fn connect_named(device: &Device, name: &Alias) -> Result<crate::ssh::Session> {
-    let endpoint = AliasStore::new(device.root().into())
-        .resolve(name)?
-        .with_context(|| {
-            format!("name {name} is not registered on this device; run blugit join CODE {name}")
-        })?;
-    connect_as(device, &endpoint).await
+    let aliases = AliasStore::new(device.root().into());
+    let endpoint = aliases.resolve(name)?.with_context(|| {
+        format!("name {name} is not registered on this device; run blugit join CODE {name}")
+    })?;
+    let (session, resolved) = connect_resolved(device, &endpoint).await?;
+    if resolved.channel != endpoint.channel {
+        aliases.refresh_contact(name, &endpoint, &resolved)?;
+    }
+    Ok(session)
 }
 pub async fn connect_as(device: &Device, endpoint: &Endpoint) -> Result<crate::ssh::Session> {
+    Ok(connect_resolved(device, endpoint).await?.0)
+}
+async fn connect_resolved(
+    device: &Device,
+    endpoint: &Endpoint,
+) -> Result<(crate::ssh::Session, Endpoint)> {
     TrustStore::new(device.root().into())
         .host(endpoint)?
         .context("repository not registered; run blugit join first")?;
-    let stream = platform::connect(&endpoint.contact())
-        .await
+    crate::resolver::resolve(endpoint, |candidate, probing| async move {
+        let stream = if probing {
+            platform::probe(&candidate.contact()).await
+        } else {
+            platform::connect(&candidate.contact()).await
+        }
         .context("connect Bluetooth transport")?;
-    crate::ssh::connect(stream, device, endpoint)
-        .await
-        .context("authenticate repository connection")
+        crate::ssh::connect(stream, device, &candidate)
+            .await
+            .context("authenticate repository connection")
+    })
+    .await
 }
 pub async fn enroll<F, Fut>(
     device: &Device,

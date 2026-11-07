@@ -8,6 +8,7 @@ mod helper;
 pub mod model;
 pub mod platform;
 pub mod protocol;
+mod resolver;
 pub mod server;
 pub mod ssh;
 pub mod storage;

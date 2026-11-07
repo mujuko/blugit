@@ -85,6 +85,7 @@ struct Harness {
     guest_state: PathBuf,
     helper_path: std::ffi::OsString,
     host: RunningHost,
+    routes: Option<String>,
 }
 impl Harness {
     fn new() -> Self {
@@ -110,6 +111,7 @@ impl Harness {
             guest_state,
             helper_path,
             host,
+            routes: None,
         }
     }
     fn init_bare(path: &Path) {
@@ -180,6 +182,14 @@ impl Harness {
             .env("GIT_COMMITTER_NAME", "Blugit Test")
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .env("GIT_TERMINAL_PROMPT", "0");
+        match &self.routes {
+            Some(routes) => {
+                c.env("BLUGIT_TEST_ROUTES", routes);
+            }
+            None => {
+                c.env_remove("BLUGIT_TEST_ROUTES");
+            }
+        }
         c.output().unwrap()
     }
     fn ok(&self, cwd: &Path, args: &[&str]) -> Vec<u8> {
@@ -391,4 +401,60 @@ fn clone_push_pull_binary_rejection_and_rebase() {
         harness.ok(&harness.repository, &["rev-parse", "main"])
     );
     harness.ok(&harness.repository, &["fsck", "--full"]);
+}
+
+#[test]
+fn moved_channel_is_authenticated_and_cached_without_reenrollment() {
+    let mut h = Harness::new();
+    h.join();
+    let alias_path = h.guest_state.join("aliases/alias-demo.json");
+    let before: serde_json::Value =
+        serde_json::from_slice(&fs::read(&alias_path).unwrap()).unwrap();
+    let trust_path = fs::read_dir(h.guest_state.join("hosts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let pinned = fs::read(&trust_path).unwrap();
+    h.host.stop();
+    h.host = RunningHost::start(&h.repository, &h.host_state);
+    let other_repo = h.root.join("other.git");
+    Harness::init_bare(&other_repo);
+    let same_host_state = h.root.join("same host wrong share");
+    fs::create_dir(&same_host_state).unwrap();
+    fs::copy(
+        h.host_state.join("identity.json"),
+        same_host_state.join("identity.json"),
+    )
+    .unwrap();
+    let wrong_share = RunningHost::start(&other_repo, &same_host_state);
+    let stranger = RunningHost::start(&other_repo, &h.root.join("stranger state"));
+    h.routes = Some(
+        serde_json::json!({"7":wrong_share.address,"3":stranger.address,"12":h.host.address})
+            .to_string(),
+    );
+    h.ok(&h.root, &["clone", "blugit://demo", "resolved-work"]);
+    let resolved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&alias_path).unwrap()).unwrap();
+    assert_eq!(resolved["endpoint"]["channel"], 12);
+    assert_eq!(resolved["endpoint"]["share"], before["endpoint"]["share"]);
+    assert_eq!(
+        resolved["endpoint"]["address"],
+        before["endpoint"]["address"]
+    );
+    assert_eq!(fs::read(&trust_path).unwrap(), pinned);
+    assert!(
+        h.host.codes.try_recv().is_err(),
+        "rediscovery must not issue an enrollment code"
+    );
+    h.routes = Some(serde_json::json!({"12":h.host.address}).to_string());
+    h.ok(&h.root.join("resolved-work"), &["fetch"]);
+    let saved_alias = fs::read(&alias_path).unwrap();
+    h.routes = Some(serde_json::json!({"12":stranger.address}).to_string());
+    let denied = h.git(&h.root.join("resolved-work"), &[OsStr::new("fetch")]);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("host key changed"));
+    assert_eq!(fs::read(&alias_path).unwrap(), saved_alias);
+    assert_eq!(fs::read(&trust_path).unwrap(), pinned);
 }

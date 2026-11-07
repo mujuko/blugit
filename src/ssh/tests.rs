@@ -121,6 +121,25 @@ async fn changed_ssh_host_key_is_rejected_even_when_enrollment_key_matches() -> 
 }
 
 #[tokio::test]
+async fn ssh_authentication_is_bound_to_the_registered_repository() -> Result<()> {
+    let f = Fixture::new()?;
+    let mut wrong = f.endpoint.clone();
+    wrong.share = ShareId::generate();
+    TrustStore::new(f.guest.root().into()).pin(&wrong, f.host.peer())?;
+    let (stream, _stop, task) = f.start();
+    let error = connect(stream, &f.guest, &wrong)
+        .await
+        .err()
+        .context("authenticated the wrong repository")?;
+    ensure!(
+        error.to_string().contains("share ID does not match"),
+        "{error:#}"
+    );
+    let _ = timeout(Duration::from_secs(2), task).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn revoked_devices_cannot_authenticate_or_start_a_new_exec() -> Result<()> {
     let f = Fixture::new()?;
     let (stream, _stop, task) = f.start();
@@ -154,7 +173,7 @@ async fn device_id_and_display_name_cannot_substitute_for_the_ssh_private_key() 
     .await?;
     let result = client
         .authenticate_publickey(
-            f.guest.peer().id(),
+            username(f.endpoint.share, f.guest.peer()),
             PrivateKeyWithHashAlg::new(Arc::new(stranger.ssh_private_key()), None),
         )
         .await?;
@@ -397,7 +416,7 @@ async fn openssh_client_can_execute_the_git_service_with_a_pinned_host_key() -> 
             .arg("-p")
             .arg(port.to_string())
             .arg("-l")
-            .arg(f.guest.peer().id())
+            .arg(username(f.endpoint.share, f.guest.peer()))
             .arg("127.0.0.1")
             .arg(format!("git-upload-pack '{}'", f.share.id()))
             .stdin(std::process::Stdio::null())

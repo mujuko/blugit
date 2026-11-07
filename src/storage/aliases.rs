@@ -75,6 +75,24 @@ impl AliasStore {
         );
         Ok(Some(record.endpoint))
     }
+    pub(crate) fn refresh_contact(
+        &self,
+        name: &Alias,
+        previous: &Endpoint,
+        authenticated: &Endpoint,
+    ) -> Result<()> {
+        ensure!(
+            previous.address == authenticated.address && previous.share == authenticated.share,
+            "channel resolution must not change the registered host or repository"
+        );
+        let reservation = self.reserve(name)?;
+        ensure!(
+            reservation.previous.as_ref() == Some(previous)
+                || reservation.previous.as_ref() == Some(authenticated),
+            "registration changed during channel resolution; retry the Git operation"
+        );
+        reservation.save(authenticated)
+    }
     pub(crate) fn reserve(&self, name: &Alias) -> Result<Reservation> {
         let lock = FileLock::acquire(
             &self.root.join("aliases").join(format!("alias-{name}.lock")),
@@ -193,6 +211,46 @@ mod tests {
         )?;
         assert!(store.resolve(&name).is_err());
         assert!(store.reserve(&name).is_err());
+        Ok(())
+    }
+    #[test]
+    fn discovered_channel_refreshes_only_the_original_binding() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = AliasStore::new(dir.path().into());
+        let name = "demo".parse()?;
+        let original = Endpoint {
+            address: "AA:BB:CC:DD:EE:FF".parse()?,
+            channel: Channel::try_from(7)?,
+            share: ShareId::generate(),
+        };
+        store.reserve(&name)?.save(&original)?;
+        let mut discovered = original.clone();
+        discovered.channel = Channel::try_from(12)?;
+        store.refresh_contact(&name, &original, &discovered)?;
+        assert_eq!(store.resolve(&name)?, Some(discovered.clone()));
+        let mut stranger = discovered.clone();
+        stranger.share = ShareId::generate();
+        assert!(
+            store
+                .refresh_contact(&name, &discovered, &stranger)
+                .is_err()
+        );
+        stranger = discovered.clone();
+        stranger.address = "11:22:33:44:55:66".parse()?;
+        assert!(
+            store
+                .refresh_contact(&name, &discovered, &stranger)
+                .is_err()
+        );
+        let mut concurrent = discovered.clone();
+        concurrent.channel = Channel::try_from(15)?;
+        store.reserve(&name)?.save(&concurrent)?;
+        assert!(
+            store
+                .refresh_contact(&name, &original, &discovered)
+                .is_err()
+        );
+        assert_eq!(store.resolve(&name)?, Some(concurrent));
         Ok(())
     }
 }

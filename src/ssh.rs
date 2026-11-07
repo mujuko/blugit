@@ -110,6 +110,9 @@ pub struct Session {
     share: crate::model::ShareId,
     _cancel: DropGuard,
 }
+pub(crate) fn username(share: crate::model::ShareId, peer: &Peer) -> String {
+    format!("{share}.{}", peer.id())
+}
 impl Session {
     /// The virtual path is the registered share ID, never a filesystem path.
     pub async fn exec(&self, service: &str) -> Result<Channel<russh::client::Msg>> {
@@ -188,10 +191,10 @@ pub async fn connect(stream: Connection, device: &Device, endpoint: &Endpoint) -
         let config = russh::client::Config { inactivity_timeout: None, ..Default::default() };
         let mut handle = russh::client::connect_stream(Arc::new(config), stream, Client { host_key }).await?;
         let auth = handle.authenticate_publickey(
-            device.peer().id(),
+            username(endpoint.share, device.peer()),
             PrivateKeyWithHashAlg::new(Arc::new(device.ssh_private_key()), None),
         ).await?;
-        ensure!(auth.success(), "SSH public key authentication refused; device is not registered or was revoked; run blugit join");
+        ensure!(auth.success(), "SSH public key authentication refused: share ID does not match the hosted repository, or device is not registered or was revoked; run blugit join");
         Ok(Session { handle, share: endpoint.share, _cancel: cancel })
     }).await.context("SSH authentication timed out")?
 }
@@ -215,6 +218,10 @@ impl Drop for Server {
 }
 impl Server {
     fn member(&self, user: &str, key: &PublicKey) -> Result<Option<Peer>> {
+        let prefix = format!("{}.", self.share.id());
+        let Some(user) = user.strip_prefix(&prefix) else {
+            return Ok(None);
+        };
         if *self.shutdown.borrow() != Shutdown::Running
             || user.len() != 64
             || !user.bytes().all(|b| b.is_ascii_hexdigit())

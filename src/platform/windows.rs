@@ -46,13 +46,16 @@ fn asynchronous(socket: Socket) -> Result<Connection> {
     )?))
 }
 pub async fn connect(endpoint: &Contact) -> Result<Connection> {
+    connect_with_timeout(endpoint, Duration::from_secs(25)).await
+}
+pub async fn connect_with_timeout(endpoint: &Contact, budget: Duration) -> Result<Connection> {
     let endpoint = *endpoint;
     let socket = tokio::task::spawn_blocking(move || -> Result<Socket> {
         let socket = socket()?;
         socket
             .connect_timeout(
                 &address(endpoint.address, u32::from(endpoint.channel.get())),
-                Duration::from_secs(25),
+                budget,
             )
             .context("Bluetooth connection failed; check the host address and channel")?;
         Ok(socket)
