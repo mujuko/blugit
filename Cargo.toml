@@ -1,0 +1,56 @@
+[package]
+name = "blugit"
+version = "1.0.0"
+edition = "2024"
+description = "Authenticated offline Git sharing over Bluetooth"
+default-run = "blugit"
+
+[features]
+default = []
+# Explicitly test-only. Release binaries never open IP listeners.
+test-transport = []
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+dunce = "1"
+fs2 = "0.4"
+hex = "0.4"
+hostname = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+snow = "0.10"
+spake2 = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "process", "sync", "time", "signal"] }
+uuid = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+socket2 = { version = "0.6", features = ["all"] }
+windows-sys = { version = "0.61", features = ["Win32_Devices_Bluetooth", "Win32_Networking_WinSock", "Win32_Foundation", "Win32_System_Com"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["rfcomm", "bluetoothd"] }
+futures-util = "0.3"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[[bin]]
+name = "blugit"
+path = "src/main.rs"
+
+[[bin]]
+name = "git-remote-blugit"
+path = "src/bin/git-remote-blugit.rs"
