@@ -481,9 +481,14 @@ uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *size) 
 }
 @end
 
+// IOBluetooth stores the query target unretained. A timeout does not cancel
+// callbacks, so keep it alive until this one-shot helper process exits.
+static SDPQuery *ActiveSDPQuery;
+
 static void DiscoverChannels(NSString *address) {
     IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
-    __attribute__((objc_precise_lifetime)) SDPQuery *query = [SDPQuery new];
+    ActiveSDPQuery = [SDPQuery new];
+    SDPQuery *query = ActiveSDPQuery;
     query.device = device;
     uuid_t bytes;
     [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
@@ -509,6 +514,7 @@ static void DiscoverChannels(NSString *address) {
     }
     // One bounded line, at most 30 unique valid channels. These are hints only.
     printf("CHANNELS");
+    int candidateCount = 0;
     for (int count = 0; count < 30; ++count) {
         int selected = 0;
         for (int channel = 1; channel <= 30; ++channel) {
@@ -517,8 +523,10 @@ static void DiscoverChannels(NSString *address) {
         if (!selected) break;
         printf("\t%d", selected);
         seen[selected] = NO;
+        ++candidateCount;
     }
     puts("");
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: SDP discovery returned %d candidate(s)\n", candidateCount);
 }
 
 int blugit_macos_main(int argc, const char **argv) {
