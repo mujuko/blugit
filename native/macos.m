@@ -65,7 +65,15 @@ int blugit_test_reserve_channel(const char *directory, int requested, int *selec
 static void ReleaseService(void) {
     [DiagnosticNotification unregister]; DiagnosticNotification = nil;
     [PublishedNotification unregister]; PublishedNotification = nil;
-    [PublishedRecord removeServiceRecord]; PublishedRecord = nil;
+    if (PublishedRecord) {
+        BluetoothSDPServiceRecordHandle handle = 0;
+        [PublishedRecord getServiceRecordHandle:&handle];
+        IOReturn status = [PublishedRecord removeServiceRecord];
+        if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS") || status != kIOReturnSuccess) {
+            fprintf(stderr, "blugit Bluetooth: remove owned record=0x%x status=0x%x\n", handle, status);
+        }
+        PublishedRecord = nil;
+    }
 }
 
 static void InstallTermination(void) {
@@ -73,7 +81,10 @@ static void InstallTermination(void) {
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
     TerminationSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, queue);
     dispatch_source_set_event_handler(TerminationSource, ^{
-        dispatch_async(dispatch_get_main_queue(), ^{ ReleaseService(); exit(0); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: SIGTERM cleanup bridges=%lu\n", (unsigned long)LiveBridges.count);
+            ReleaseService(); exit(0);
+        });
         // A blocked OS connect must not leave an orphaned helper after Ctrl+C.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), queue, ^{ _exit(143); });
     });
@@ -144,6 +155,7 @@ static void MonitorParent(void) {
             if (count <= 0) break;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: parent control closed bridges=%lu\n", (unsigned long)LiveBridges.count);
             ParentGone = YES;
             ReleaseService();
             // Let active bridges drain queued final bytes/ACK before exiting.
@@ -410,7 +422,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "blugit Bluetooth: observed channel=%u incoming=%d open=%d object=%llu expected=%u\n", channel.getChannelID, channel.isIncoming, channel.isOpen, (unsigned long long)channel.getObjectID, self.expected);
 }
 - (void)opened:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
-    (void)notification;
+    // Registration can synchronously report already-open channels with another
+    // notification handle. Never attach or close a channel we did not request.
+    if (notification != PublishedNotification || channel.getChannelID != self.expected || !channel.isIncoming) {
+        if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+            fprintf(stderr, "blugit Bluetooth: ignored notification own=%d channel=%u incoming=%d expected=%u\n", notification == PublishedNotification, channel.getChannelID, channel.isIncoming, self.expected);
+        }
+        return;
+    }
     if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
         fprintf(stderr, "blugit Bluetooth: incoming channel=%u incoming=%d open=%d object=%llu expected=%u\n", channel.getChannelID, channel.isIncoming, channel.isOpen, (unsigned long long)channel.getObjectID, self.expected);
     }
@@ -487,8 +506,12 @@ int blugit_macos_main(int argc, const char **argv) {
                 BluetoothSDPServiceRecordHandle handle = 0;
                 IOReturn status = [PublishedRecord getServiceRecordHandle:&handle];
                 fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x status=0x%x\n", reserved, handle, status);
-                DiagnosticNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(observed:channel:)];
-                if (!DiagnosticNotification) fprintf(stderr, "blugit Bluetooth: diagnostic observer registration failed\n");
+                // Creating framework channel wrappers can affect their lifetime.
+                // Keep this experiment separate from ordinary diagnostic logs.
+                if (getenv("BLUGIT_BLUETOOTH_OBSERVE_ALL")) {
+                    DiagnosticNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(observed:channel:)];
+                    if (!DiagnosticNotification) fprintf(stderr, "blugit Bluetooth: diagnostic observer registration failed\n");
+                }
             }
             PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
             if (!PublishedNotification) { ReleaseService(); Fail(@"Cannot listen on allocated RFCOMM channel"); }
