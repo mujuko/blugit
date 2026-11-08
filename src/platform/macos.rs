@@ -254,7 +254,19 @@ pub struct Listener {
     output: BufReader<tokio::net::UnixStream>,
 }
 
+fn notification_mode(value: Option<&std::ffi::OsStr>) -> Result<&'static str> {
+    match value.map(OsStrExt::as_bytes) {
+        None | Some(b"channel") => Ok("channel"),
+        Some(b"all") => Ok("all"),
+        _ => bail!("BLUGIT_MACOS_NOTIFICATION_MODE must be channel or all"),
+    }
+}
+
 pub async fn listen(channel: Option<Channel>) -> Result<Listener> {
+    // Internal comparison of two public SDK registration paths. Both modes
+    // live in the same permission-owning binary; the default stays filtered.
+    let mode = std::env::var_os("BLUGIT_MACOS_NOTIFICATION_MODE");
+    let mode = notification_mode(mode.as_deref())?;
     let directory = std::sync::Arc::new(tempfile::tempdir()?);
     let path = directory.path().join("stream");
     let socket = tokio::net::UnixListener::bind(&path)?;
@@ -262,6 +274,7 @@ pub async fn listen(channel: Option<Channel>) -> Result<Listener> {
         "host".into(),
         path.to_str().context("socket path is not UTF-8")?.into(),
         channel.map_or(0, Channel::get).to_string(),
+        mode.into(),
     ])
     .await?;
     let value = line(&mut output).await?;
@@ -371,6 +384,93 @@ mod tests {
             count: *mut u32,
         ) -> u64;
         fn blugit_test_sdp_generation_fixture(fixture: u32) -> u64;
+        fn blugit_test_sdp_channel_fixture(fixture: u32) -> i32;
+        fn blugit_test_publication_ownership_fixture(fixture: u32) -> u32;
+        fn blugit_test_notification_filter(
+            complete: i32,
+            own: i32,
+            existing: i32,
+            expected: i32,
+            actual: i32,
+            incoming: i32,
+        ) -> i32;
+    }
+
+    #[test]
+    fn notification_mode_defaults_to_channel_and_only_accepts_explicit_modes() {
+        use std::ffi::OsStr;
+        assert_eq!(super::notification_mode(None).unwrap(), "channel");
+        for mode in ["channel", "all"] {
+            assert_eq!(
+                super::notification_mode(Some(OsStr::new(mode))).unwrap(),
+                mode
+            );
+        }
+        for invalid in ["", "ALL", "0", "channel all"] {
+            assert!(super::notification_mode(Some(OsStr::new(invalid))).is_err());
+        }
+        assert!(super::notification_mode(Some(OsStr::from_bytes(b"\xff"))).is_err());
+    }
+
+    #[test]
+    fn sdp_channel_reader_checks_structure_types_and_range_without_the_sdk_getter() {
+        for fixture in 0..=25 {
+            let expected = match fixture {
+                0 => 1,
+                1 => 30,
+                2 | 23 => 13,
+                _ => 0,
+            };
+            // SAFETY: fixtures only construct in-memory SDK objects, without radio access.
+            let actual = unsafe { blugit_test_sdp_channel_fixture(fixture) };
+            assert_eq!(actual, expected, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn publication_cleanup_requires_the_same_class_token_and_channel_at_removal() {
+        for fixture in 0..=11 {
+            // Bits report adoption, removal, and the fake record's removal count.
+            let expected = match fixture {
+                0 => 0x103,
+                9 => 1,
+                _ => 0,
+            };
+            // SAFETY: the fixture overrides removal with a counter; no service is published.
+            let actual = unsafe { blugit_test_publication_ownership_fixture(fixture) };
+            assert_eq!(actual, expected, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn both_notification_modes_reject_unowned_existing_outgoing_and_wrong_channels() {
+        for complete in 0..=1 {
+            for own in 0..=1 {
+                for existing in 0..=1 {
+                    for incoming in 0..=1 {
+                        for (expected, actual) in [(1, 1), (13, 13), (1, 3), (0, 0), (31, 31)] {
+                            let accept = complete == 1
+                                && own == 1
+                                && existing == 0
+                                && incoming == 1
+                                && (1..=30).contains(&expected)
+                                && actual == expected;
+                            // SAFETY: the production callback filter takes scalar values only.
+                            let result = unsafe {
+                                blugit_test_notification_filter(
+                                    complete, own, existing, expected, actual, incoming,
+                                )
+                            };
+                            assert_eq!(
+                                result != 0,
+                                accept,
+                                "complete={complete} own={own} existing={existing} incoming={incoming} expected={expected} actual={actual}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
