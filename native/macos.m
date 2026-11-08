@@ -24,8 +24,12 @@ static NSMutableSet *LiveBridges;
 static BOOL Guest = NO;
 static BOOL ParentGone = NO;
 static IOBluetoothSDPServiceRecord *PublishedRecord;
+static IOBluetoothSDPUUID *PublishedToken;
+static BluetoothRFCOMMChannelID PublishedChannel;
 static IOBluetoothUserNotification *PublishedNotification;
 static dispatch_source_t TerminationSource;
+
+static BOOL RecordMatchesPublication(IOBluetoothSDPServiceRecord *record, IOBluetoothSDPUUID *token, int expected);
 
 // IOBluetooth can return the requested channel even when another blugit
 // process has already published it. Keep this lock in the native owner, not
@@ -61,17 +65,27 @@ int blugit_test_reserve_channel(const char *directory, int requested, int *selec
 }
 #endif
 
+static BOOL RemoveOwnedPublication(IOBluetoothSDPServiceRecord *record, IOBluetoothSDPUUID *token, int expected) {
+    if (!RecordMatchesPublication(record, token, expected)) return NO;
+    BluetoothSDPServiceRecordHandle handle = 0;
+    [record getServiceRecordHandle:&handle];
+    IOReturn status = [record removeServiceRecord];
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS") || status != kIOReturnSuccess) {
+        fprintf(stderr, "blugit Bluetooth: remove owned record=0x%x status=0x%x\n", handle, status);
+    }
+    return YES;
+}
+
 static void ReleaseService(void) {
     [PublishedNotification unregister]; PublishedNotification = nil;
     if (PublishedRecord) {
-        BluetoothSDPServiceRecordHandle handle = 0;
-        [PublishedRecord getServiceRecordHandle:&handle];
-        IOReturn status = [PublishedRecord removeServiceRecord];
-        if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS") || status != kIOReturnSuccess) {
-            fprintf(stderr, "blugit Bluetooth: remove owned record=0x%x status=0x%x\n", handle, status);
+        if (!RemoveOwnedPublication(PublishedRecord, PublishedToken, PublishedChannel)) {
+            fprintf(stderr, "blugit Bluetooth: ownership changed; leaving record untouched\n");
         }
         PublishedRecord = nil;
     }
+    PublishedToken = nil;
+    PublishedChannel = 0;
 }
 
 static void InstallTermination(void) {
@@ -423,17 +437,31 @@ int main(int argc, char **argv) {
 }
 @end
 
+static BOOL AcceptNotification(BOOL registrationComplete, BOOL own, BOOL existing, int expected, int actual, BOOL incoming) {
+    return registrationComplete && own && !existing && expected >= 1 && expected <= 30 && actual == expected && incoming;
+}
+
 @interface Listener : NSObject
 @property(nonatomic, strong) NSString *path;
 @property(nonatomic) BluetoothRFCOMMChannelID expected;
+@property(nonatomic) BOOL registrationComplete;
+@property(nonatomic, strong) NSMutableSet<NSString *> *existingChannels;
 @end
 @implementation Listener
 - (void)opened:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
-    // Registration can synchronously report already-open channels with another
-    // notification handle. Never attach or close a channel we did not request.
-    if (notification != PublishedNotification || channel.getChannelID != self.expected || !channel.isIncoming) {
+    // Registration can synchronously report already-open channels. Remember
+    // them and never attach, close, or change their delegates, even if repeated.
+    NSString *object = [NSString stringWithFormat:@"%u:%llu", channel.getChannelID, (unsigned long long)channel.getObjectID];
+    if (!self.registrationComplete) [self.existingChannels addObject:object];
+    BOOL existing = [self.existingChannels containsObject:object];
+    for (Bridge *bridge in LiveBridges) {
+        if (bridge.channel == channel || bridge.channel.getObjectID == channel.getObjectID) existing = YES;
+    }
+    BOOL own = PublishedNotification && notification == PublishedNotification
+        && RecordMatchesPublication(PublishedRecord, PublishedToken, self.expected);
+    if (!AcceptNotification(self.registrationComplete, own, existing, self.expected, channel.getChannelID, channel.isIncoming)) {
         if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
-            fprintf(stderr, "blugit Bluetooth: ignored notification own=%d channel=%u incoming=%d expected=%u\n", notification == PublishedNotification, channel.getChannelID, channel.isIncoming, self.expected);
+            fprintf(stderr, "blugit Bluetooth: ignored notification own=%d channel=%u incoming=%d expected=%u existing=%d registering=%d\n", own, channel.getChannelID, channel.isIncoming, self.expected, existing, !self.registrationComplete);
         }
         return;
     }
@@ -444,7 +472,7 @@ int main(int argc, char **argv) {
     for (Bridge *bridge in LiveBridges) {
         if ([bridge.channel.getDevice.addressString isEqualToString:channel.getDevice.addressString]) {
             if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: rejected duplicate peer bridge\n");
-            [channel closeChannel]; return;
+            return;
         }
     }
     Bridge *bridge = [Bridge new];
@@ -478,20 +506,96 @@ static uint64_t ReadPublicationGeneration(IOBluetoothSDPDataElement *element) {
     return (values[0] << 32) | values[1];
 }
 
-static NSDictionary *ServiceRecord(int channel) {
+static IOBluetoothSDPUUID *UUIDValue(NSString *text) {
     uuid_t bytes;
-    [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
+    NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:text];
+    if (!uuid) return nil;
+    [uuid getUUIDBytes:bytes];
+    return [IOBluetoothSDPUUID uuidWithBytes:bytes length:16];
+}
+
+static NSArray *SDPSequence(id element) {
+    if (![element isKindOfClass:IOBluetoothSDPDataElement.class] || [element getTypeDescriptor] != 6) return nil;
+    id parts = [element getArrayValue];
+    return [parts isKindOfClass:NSArray.class] ? parts : nil;
+}
+
+static IOBluetoothSDPUUID *SDPUUIDValue(id element) {
+    if (![element isKindOfClass:IOBluetoothSDPDataElement.class] || [element getTypeDescriptor] != 3) return nil;
+    uint32_t size = [element getSize];
+    if (size != 2 && size != 4 && size != 16) return nil;
+    id uuid = [element getUUIDValue];
+    return [uuid isKindOfClass:IOBluetoothSDPUUID.class] && [uuid length] == size ? uuid : nil;
+}
+
+static BOOL SDPMatchesUUID(id element, IOBluetoothSDPUUID *expected) {
+    IOBluetoothSDPUUID *uuid = SDPUUIDValue(element);
+    return uuid && expected && [uuid isEqualToUUID:expected];
+}
+
+static BOOL ReadRFCOMMChannel(IOBluetoothSDPDataElement *element, BluetoothRFCOMMChannelID *channel) {
+    // Do not use getRFCOMMChannelID: the local SDK getter can disagree with
+    // its ProtocolDescriptorList. Accept uint8 and SDK-normalized uint16/32.
+    @try {
+        NSArray *protocols = SDPSequence(element);
+        if (!protocols || protocols.count == 0 || protocols.count > 16) return NO;
+        BOOL found = NO;
+        BluetoothRFCOMMChannelID selected = 0;
+        for (id descriptor in protocols) {
+            NSArray *parts = SDPSequence(descriptor);
+            if (!parts || parts.count == 0 || parts.count > 16) return NO;
+            IOBluetoothSDPUUID *uuid = SDPUUIDValue(parts[0]);
+            if (!uuid) return NO;
+            if (![uuid isEqualToUUID:[IOBluetoothSDPUUID uuid16:0x0003]]) continue;
+            if (found || parts.count != 2) return NO;
+            id numberElement = parts[1];
+            if (![numberElement isKindOfClass:IOBluetoothSDPDataElement.class] || [numberElement getTypeDescriptor] != 1) return NO;
+            uint32_t size = [numberElement getSize];
+            if (size != 1 && size != 2 && size != 4) return NO;
+            id number = [numberElement getNumberValue];
+            if (![number isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)number) == CFBooleanGetTypeID()) return NO;
+            const char *type = [number objCType];
+            if (!type || !strchr("cCsSiIlLqQ", type[0]) || type[1]) return NO;
+            uint64_t value = [number unsignedLongLongValue];
+            if (value < 1 || value > 30) return NO;
+            selected = (BluetoothRFCOMMChannelID)value;
+            found = YES;
+        }
+        if (found) *channel = selected;
+        return found;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return NO;
+    }
+}
+
+static BOOL RecordMatchesPublication(IOBluetoothSDPServiceRecord *record, IOBluetoothSDPUUID *token, int expected) {
+    @try {
+        if (![record isKindOfClass:IOBluetoothSDPServiceRecord.class] || !token || expected < 1 || expected > 30) return NO;
+        NSArray *classes = SDPSequence([record getAttributeDataElement:0x0001]);
+        if (classes.count != 1 || !SDPMatchesUUID(classes[0], UUIDValue(ServiceUUID))) return NO;
+        if (!SDPMatchesUUID([record getAttributeDataElement:0x0201], token)) return NO;
+        BluetoothRFCOMMChannelID channel = 0;
+        return ReadRFCOMMChannel([record getAttributeDataElement:0x0004], &channel) && channel == expected;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return NO;
+    }
+}
+
+static NSDictionary *ServiceRecord(int channel, IOBluetoothSDPUUID *token) {
     // An unauthenticated ordering hint for stale advertisements. The SSH host
     // key and share binding remain the authority for accepting a candidate.
     uint64_t publishedMilliseconds = (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000.0);
     return @{
-        @"0001": @[[IOBluetoothSDPUUID uuidWithBytes:bytes length:16]],
+        @"0001": @[UUIDValue(ServiceUUID)],
         @"0004": @[
             @[[IOBluetoothSDPUUID uuid16:0x0100]],
             @[[IOBluetoothSDPUUID uuid16:0x0003], @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @(channel)}]
         ],
         @"0100": @"blugit",
-        @"0200": PublicationGenerationValue(publishedMilliseconds)
+        @"0200": PublicationGenerationValue(publishedMilliseconds),
+        @"0201": token
     };
 }
 
@@ -500,7 +604,7 @@ static NSDictionary *ServiceRecord(int channel) {
 // conversion without publishing a service or initializing the radio.
 uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *count) {
     @autoreleasepool {
-        IOBluetoothSDPDataElement *element = [IOBluetoothSDPDataElement withElementValue:ServiceRecord(10)[@"0200"]];
+        IOBluetoothSDPDataElement *element = [IOBluetoothSDPDataElement withElementValue:ServiceRecord(10, UUIDValue(NSUUID.UUID.UUIDString))[@"0200"]];
         *type = element.getTypeDescriptor;
         *count = (uint32_t)element.getArrayValue.count;
         return ReadPublicationGeneration(element);
@@ -529,6 +633,116 @@ uint64_t blugit_test_sdp_generation_fixture(uint32_t fixture) {
         }
         return ReadPublicationGeneration([IOBluetoothSDPDataElement withElementValue:value]);
     }
+}
+#endif
+
+#ifdef BLUGIT_TEST_TRANSPORT
+// These fixtures only construct in-memory SDK values. They never publish a
+// service, register a notification, initialize the radio, or remove a service.
+int blugit_test_sdp_channel_fixture(uint32_t fixture) {
+    @autoreleasepool {
+        id l2cap = @[[IOBluetoothSDPUUID uuid16:0x0100]];
+        id uuid = [IOBluetoothSDPUUID uuid16:0x0003];
+        id number = @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @1};
+        id value;
+        switch (fixture) {
+            case 0: value = @[l2cap, @[uuid, number]]; break;
+            case 1: value = @[l2cap, @[uuid, SDPUnsigned32(30)]]; break;
+            case 2: value = @[l2cap, @[uuid, @{@"DataElementType": @1, @"DataElementSize": @2, @"DataElementValue": @13}]]; break;
+            case 3: value = nil; break;
+            case 4: value = @7; break;
+            case 5: value = @[l2cap, @[uuid]]; break;
+            case 6: value = @[l2cap, @[uuid, SDPUnsigned32(0)]]; break;
+            case 7: value = @[l2cap, @[uuid, SDPUnsigned32(31)]]; break;
+            case 8: value = @[l2cap, @[uuid, @{@"DataElementType": @1, @"DataElementSize": @4, @"DataElementValue": @(-1)}]]; break;
+            case 9: value = @[l2cap, @[uuid, @{@"DataElementType": @2, @"DataElementSize": @4, @"DataElementValue": @3}]]; break;
+            case 10: value = @[l2cap, @[uuid, @"3"]]; break;
+            case 11: case 12: case 19: {
+                id raw = fixture == 11 ? @2.5 : fixture == 12 ? @YES : NSNull.null;
+                IOBluetoothSDPDataElement *bad = [IOBluetoothSDPDataElement withType:1 sizeDescriptor:2 size:4 value:raw];
+                IOBluetoothSDPDataElement *uuidElement = [IOBluetoothSDPDataElement withElementValue:uuid];
+                IOBluetoothSDPDataElement *descriptor = [IOBluetoothSDPDataElement withType:6 sizeDescriptor:5 size:0 value:@[uuidElement, bad]];
+                IOBluetoothSDPDataElement *root = [IOBluetoothSDPDataElement withType:6 sizeDescriptor:5 size:0 value:@[descriptor]];
+                BluetoothRFCOMMChannelID channel = 0xfe;
+                BOOL valid = ReadRFCOMMChannel(root, &channel);
+                return valid ? channel : channel == 0xfe ? 0 : -2;
+            }
+            case 13: value = @[l2cap, @[uuid, @{@"DataElementType": @1, @"DataElementSize": @8, @"DataElementValue": @3}]]; break;
+            case 14: value = @[l2cap, @[@3, number]]; break;
+            case 15: value = @[l2cap]; break;
+            case 16: value = @[l2cap, @[uuid, number], @[uuid, number]]; break;
+            case 17: value = @[l2cap, @[uuid, number, number]]; break;
+            case 18: value = @[l2cap, @[[IOBluetoothSDPUUID uuid16:4], number]]; break;
+            case 20: value = @[@3]; break;
+            case 21: value = @[]; break;
+            case 22: value = @[l2cap, @[]]; break;
+            case 23: value = @[l2cap, @[[uuid getUUIDWithLength:16], SDPUnsigned32(13)]]; break;
+            case 24: value = @[l2cap, @[uuid, SDPUnsigned32(UINT32_MAX)]]; break;
+            case 25: {
+                NSMutableArray *many = [NSMutableArray new];
+                for (int i = 0; i < 17; ++i) [many addObject:l2cap];
+                [many addObject:@[uuid, number]];
+                value = many; break;
+            }
+            default: return -1;
+        }
+        BluetoothRFCOMMChannelID channel = 0xfe;
+        IOBluetoothSDPDataElement *element = value ? [IOBluetoothSDPDataElement withElementValue:value] : nil;
+        BOOL valid = ReadRFCOMMChannel(element, &channel);
+        return valid ? channel : channel == 0xfe ? 0 : -2;
+    }
+}
+
+@interface TestPublicationRecord : IOBluetoothSDPServiceRecord
+@property(nonatomic) uint32_t removals;
+@property(nonatomic, strong) IOBluetoothSDPDataElement *replacementToken;
+@end
+@implementation TestPublicationRecord
+- (IOBluetoothSDPDataElement *)getAttributeDataElement:(BluetoothSDPServiceAttributeID)attribute {
+    if (attribute == 0x0201 && self.replacementToken) return self.replacementToken;
+    return [super getAttributeDataElement:attribute];
+}
+- (IOReturn)removeServiceRecord { self.removals += 1; return kIOReturnSuccess; }
+@end
+
+uint32_t blugit_test_publication_ownership_fixture(uint32_t fixture) {
+    @autoreleasepool {
+        IOBluetoothSDPUUID *token = UUIDValue(@"a5eec324-849f-4a9f-90dc-42767a3e104b");
+        IOBluetoothSDPUUID *other = UUIDValue(@"74243fef-d7dd-459b-8b7f-106740c49350");
+        NSMutableDictionary *definition = [ServiceRecord(1, token) mutableCopy];
+        switch (fixture) {
+            case 0: break;
+            case 1: definition[@"0201"] = other; break;
+            case 2: [definition removeObjectForKey:@"0201"]; break;
+            case 3: definition[@"0001"] = @[UUIDValue(ServiceUUID), other]; break;
+            case 4: definition[@"0001"] = @[other]; break;
+            case 5: definition[@"0004"] = ServiceRecord(2, token)[@"0004"]; break;
+            case 6: [definition removeObjectForKey:@"0004"]; break;
+            case 7: definition[@"0201"] = @"a5eec324-849f-4a9f-90dc-42767a3e104b"; break;
+            case 8: definition[@"0001"] = UUIDValue(ServiceUUID); break;
+            case 9: break; // Adoption succeeds, then ownership changes before cleanup.
+            case 10: token = nil; break;
+            case 11: break;
+            default: return UINT32_MAX;
+        }
+        // The record initializer takes decoded numeric attribute keys and SDK
+        // elements, unlike the publication factory's plist dictionary format.
+        NSMutableDictionary *attributes = [NSMutableDictionary new];
+        for (NSString *key in definition) {
+            unsigned attribute = 0;
+            [[NSScanner scannerWithString:key] scanHexInt:&attribute];
+            attributes[@(attribute)] = [IOBluetoothSDPDataElement withElementValue:definition[key]];
+        }
+        TestPublicationRecord *record = fixture == 11 ? nil : [[TestPublicationRecord alloc] initWithServiceDictionary:attributes device:nil];
+        BOOL matches = RecordMatchesPublication(record, token, 1);
+        if (fixture == 9) record.replacementToken = [IOBluetoothSDPDataElement withElementValue:other];
+        BOOL removed = RemoveOwnedPublication(record, token, 1);
+        return (matches ? 1 : 0) | (removed ? 2 : 0) | (record.removals << 8);
+    }
+}
+
+int blugit_test_notification_filter(int complete, int own, int existing, int expected, int actual, int incoming) {
+    return AcceptNotification(complete != 0, own != 0, existing != 0, expected, actual, incoming != 0);
 }
 #endif
 
@@ -567,7 +781,7 @@ static void DiscoverChannels(NSString *address) {
     if (status == kIOReturnSuccess && query.done && query.status == kIOReturnSuccess) {
         for (IOBluetoothSDPServiceRecord *record in device.services) {
             BluetoothRFCOMMChannelID channel = 0;
-            if (![record matchesUUIDArray:uuids] || [record getRFCOMMChannelID:&channel] != kIOReturnSuccess || channel < 1 || channel > 30) continue;
+            if (![record matchesUUIDArray:uuids] || !ReadRFCOMMChannel([record getAttributeDataElement:0x0004], &channel)) continue;
             IOBluetoothSDPDataElement *element = [record getAttributeDataElement:0x0200];
             uint64_t value = ReadPublicationGeneration(element);
             seen[channel] = YES;
@@ -608,11 +822,14 @@ int blugit_macos_main(int argc, const char **argv) {
         if (!address) Fail(@"No local Bluetooth address");
         if ([mode isEqualToString:@"address"]) { puts(address.UTF8String); return 0; }
         if ([mode isEqualToString:@"discover"] && argc == 2) { DiscoverChannels(@(argv[1])); return 0; }
-        if ([mode isEqualToString:@"host"] && argc == 3) {
+        if ([mode isEqualToString:@"host"] && argc == 4) {
             int requested = atoi(argv[2]);
             if (requested < 0 || requested > 30) Fail(@"Invalid RFCOMM channel");
+            NSString *notificationMode = @(argv[3]);
+            if (![notificationMode isEqualToString:@"channel"] && ![notificationMode isEqualToString:@"all"]) Fail(@"Invalid RFCOMM notification mode");
             __attribute__((objc_precise_lifetime)) Listener *listener = [Listener new];
             listener.path = @(argv[1]);
+            listener.existingChannels = [NSMutableSet new];
             // The reservation namespace is independent of BLUGIT_HOME and the
             // helper binary cache. Never unlink its files: an existing inode
             // may still be locked by another process.
@@ -629,10 +846,20 @@ int blugit_macos_main(int argc, const char **argv) {
                     if (errno == EADDRINUSE) Fail(requested ? @"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation" : @"No free RFCOMM channel is available");
                     Fail([NSString stringWithFormat:@"Cannot reserve RFCOMM channel: %s", strerror(errno)]);
                 }
-                PublishedRecord = [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:ServiceRecord(candidate)];
-                BOOL valid = PublishedRecord && [PublishedRecord getRFCOMMChannelID:&reserved] == kIOReturnSuccess && reserved == candidate;
-                if (valid) { ChannelReservation = reservation; atexit(ReleaseReservation); break; }
-                ReleaseService(); close(reservation);
+                IOBluetoothSDPUUID *token = UUIDValue(NSUUID.UUID.UUIDString);
+                IOBluetoothSDPServiceRecord *record = [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:ServiceRecord(candidate, token)];
+                if (RecordMatchesPublication(record, token, candidate)) {
+                    PublishedRecord = record;
+                    PublishedToken = token;
+                    PublishedChannel = reserved = (BluetoothRFCOMMChannelID)candidate;
+                    ChannelReservation = reservation;
+                    atexit(ReleaseReservation);
+                    break;
+                }
+                // A factory can return a pre-existing service. Never adopt or
+                // remove any return value that fails our complete identity.
+                fprintf(stderr, "blugit Bluetooth: publication identity mismatch channel=%d; returned record left untouched\n", candidate);
+                close(reservation);
                 if (requested) Fail(@"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation");
                 first = candidate + 1;
             }
@@ -642,10 +869,15 @@ int blugit_macos_main(int argc, const char **argv) {
                 BluetoothSDPServiceRecordHandle handle = 0;
                 IOReturn status = [PublishedRecord getServiceRecordHandle:&handle];
                 uint64_t generation = ReadPublicationGeneration([PublishedRecord getAttributeDataElement:0x0200]);
-                fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x generation=%llu status=0x%x\n", reserved, handle, (unsigned long long)generation, status);
+                fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x generation=%llu status=0x%x notifications=%s token=%s\n", reserved, handle, (unsigned long long)generation, status, notificationMode.UTF8String, PublishedToken.description.UTF8String);
             }
-            PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
+            if ([notificationMode isEqualToString:@"all"]) {
+                PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:)];
+            } else {
+                PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
+            }
             if (!PublishedNotification) { ReleaseService(); Fail(@"Cannot listen on allocated RFCOMM channel"); }
+            listener.registrationComplete = YES;
             printf("READY\t%s\t%d\n", address.UTF8String, reserved);
             for (;;) {
                 @autoreleasepool { [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]]; }
