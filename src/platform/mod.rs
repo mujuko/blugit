@@ -11,9 +11,13 @@ pub const SERVICE: uuid::Uuid = uuid::Uuid::from_u128(0x86b63824106648f5a694fd5b
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+mod windows_discovery;
+#[cfg(windows)]
 mod windows_stream;
 #[cfg(windows)]
 use windows as native;
+#[cfg(windows)]
+pub use windows_discovery::internal_helper as internal_discovery_helper;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -51,6 +55,23 @@ fn allocated_channel(requested: Option<Channel>, selected: u32) -> Result<Channe
 }
 pub async fn local_address() -> Result<Address> {
     native::local_address().await
+}
+pub(crate) async fn discovery_channels(address: Address) -> Vec<Channel> {
+    #[cfg(feature = "test-transport")]
+    if std::env::var_os("BLUGIT_TEST_ADDR").is_some()
+        || std::env::var_os("BLUGIT_TEST_ROUTES").is_some()
+    {
+        return Vec::new();
+    }
+    #[cfg(windows)]
+    {
+        windows_discovery::candidates(address).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = address;
+        Vec::new()
+    }
 }
 pub async fn connect(endpoint: &Contact) -> Result<Connection> {
     #[cfg(feature = "test-transport")]

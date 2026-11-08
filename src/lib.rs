@@ -16,6 +16,10 @@ pub mod storage;
 mod test_support;
 
 pub fn entry(helper: bool) -> std::process::ExitCode {
+    #[cfg(windows)]
+    if let Some(code) = platform::internal_discovery_helper() {
+        return std::process::ExitCode::from(code);
+    }
     #[cfg(target_os = "macos")]
     if let Some(code) = platform::internal_helper() {
         return std::process::ExitCode::from(code);

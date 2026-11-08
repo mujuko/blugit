@@ -34,17 +34,21 @@ async fn connect_resolved(
     TrustStore::new(device.root().into())
         .host(endpoint)?
         .context("repository not registered; run blugit join first")?;
-    crate::resolver::resolve(endpoint, |candidate, probing| async move {
-        let stream = if probing {
-            platform::probe(&candidate.contact()).await
-        } else {
-            platform::connect(&candidate.contact()).await
-        }
-        .context("connect Bluetooth transport")?;
-        crate::ssh::connect(stream, device, &candidate)
-            .await
-            .context("authenticate repository connection")
-    })
+    crate::resolver::resolve(
+        endpoint,
+        platform::discovery_channels(endpoint.address),
+        |candidate, probing| async move {
+            let stream = if probing {
+                platform::probe(&candidate.contact()).await
+            } else {
+                platform::connect(&candidate.contact()).await
+            }
+            .context("connect Bluetooth transport")?;
+            crate::ssh::connect(stream, device, &candidate)
+                .await
+                .context("authenticate repository connection")
+        },
+    )
     .await
 }
 pub async fn enroll<F, Fut>(
