@@ -200,7 +200,7 @@ fn query(address: Address) -> Result<Vec<u8>> {
             response.lpcsaBuffer.cast(),
             count * size_of::<CSADDR_INFO>(),
         )?;
-        for entry in addresses.chunks_exact(size_of::<CSADDR_INFO>()) {
+        for entry in addresses.as_chunks::<{ size_of::<CSADDR_INFO>() }>().0 {
             // SAFETY: exact, checked chunk of provider initialized storage.
             let entry = unsafe { ptr::read_unaligned(entry.as_ptr().cast::<CSADDR_INFO>()) };
             if entry.RemoteAddr.iSockaddrLength < size_of::<SOCKADDR_BTH>() as i32 {
