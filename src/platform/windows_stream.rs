@@ -5,6 +5,7 @@ use std::{
     future::Future,
     io::{self, Read, Write},
     net::Shutdown,
+    os::windows::io::AsRawSocket,
     pin::Pin,
     sync::mpsc,
     task::{Context, Poll, ready},
@@ -35,17 +36,37 @@ impl BluetoothStream {
         socket.set_nonblocking(false)?;
         let mut reader = socket.try_clone()?;
         let mut writer = socket.try_clone()?;
+        let diagnostics = std::env::var_os("BLUGIT_BLUETOOTH_DIAGNOSTICS").is_some();
+        let socket_id = socket.as_raw_socket();
+        if diagnostics {
+            eprintln!(
+                "blugit Bluetooth: Winsock stream opened pid={} socket={socket_id}",
+                std::process::id()
+            );
+        }
         let (send, input) = async_mpsc::channel(2);
         std::thread::spawn(move || {
+            let mut received = false;
             loop {
                 let mut bytes = vec![0; crate::platform::CHUNK];
                 let result = match reader.read(&mut bytes) {
                     Ok(count) => {
+                        if diagnostics && (!received || count == 0) {
+                            eprintln!(
+                                "blugit Bluetooth: Winsock read socket={socket_id} bytes={count}"
+                            );
+                        }
+                        received |= count > 0;
                         bytes.truncate(count);
                         Ok(bytes)
                     }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) => Err(error),
+                    Err(error) => {
+                        if diagnostics {
+                            eprintln!("blugit Bluetooth: Winsock read socket={socket_id}: {error}");
+                        }
+                        Err(error)
+                    }
                 };
                 let ended = match &result {
                     Ok(bytes) => bytes.is_empty(),
@@ -58,9 +79,14 @@ impl BluetoothStream {
         });
         let (output, receive) = mpsc::channel::<WriteJob>();
         std::thread::spawn(move || {
+            let mut sent = false;
             for job in receive {
                 let result = writer.write_all(&job.bytes).map(|()| job.bytes.len());
                 let failed = result.is_err();
+                if diagnostics && (!sent || failed) {
+                    eprintln!("blugit Bluetooth: Winsock write socket={socket_id}: {result:?}");
+                }
+                sent |= !failed;
                 let _ = job.complete.send(result);
                 if failed {
                     break;
@@ -169,7 +195,13 @@ impl Drop for BluetoothStream {
     fn drop(&mut self) {
         // This wakes both blocking socket workers, including on Ctrl+C and a
         // cancelled connection. Dropping input also wakes a full blocking_send.
-        let _ = self.socket.shutdown(Shutdown::Both);
+        let result = self.socket.shutdown(Shutdown::Both);
+        if std::env::var_os("BLUGIT_BLUETOOTH_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "blugit Bluetooth: Winsock stream dropped socket={} shutdown={result:?}",
+                self.socket.as_raw_socket()
+            );
+        }
     }
 }
 

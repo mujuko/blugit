@@ -365,8 +365,11 @@ mod tests {
             requested: i32,
             selected: *mut i32,
         ) -> i32;
-        fn blugit_test_sdp_publication_generation(type_descriptor: *mut u32, size: *mut u32)
-        -> u64;
+        fn blugit_test_sdp_publication_generation(
+            type_descriptor: *mut u32,
+            count: *mut u32,
+        ) -> u64;
+        fn blugit_test_sdp_generation_fixture(fixture: u32) -> u64;
     }
 
     #[test]
@@ -435,19 +438,31 @@ mod tests {
     }
 
     #[test]
-    fn sdp_publication_generation_uses_unsigned_eight_byte_epoch_milliseconds() -> anyhow::Result<()>
-    {
+    fn sdp_publication_generation_uses_two_unsigned_four_byte_parts() -> anyhow::Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
         let before = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-        let (mut type_descriptor, mut size) = (0, 0);
+        let (mut type_descriptor, mut count) = (0, 0);
         // SAFETY: both output pointers are valid for the native SDK conversion.
         let generation =
-            unsafe { blugit_test_sdp_publication_generation(&mut type_descriptor, &mut size) };
+            unsafe { blugit_test_sdp_publication_generation(&mut type_descriptor, &mut count) };
         let after = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
-        assert_eq!((type_descriptor, size), (1, 8));
+        assert_eq!((type_descriptor, count), (6, 2));
         assert!(generation > u64::from(u32::MAX));
         assert!((before..=after).contains(&u128::from(generation)));
         Ok(())
+    }
+
+    #[test]
+    fn sdp_generation_decoder_preserves_word_order_and_rejects_wrong_shapes() {
+        let decode = |fixture| {
+            // SAFETY: native SDK fixtures take only an integer selector, no pointers or radio access.
+            unsafe { blugit_test_sdp_generation_fixture(fixture) }
+        };
+        assert_eq!(decode(0), 1_794_153_802_861);
+        assert_eq!(decode(1), u64::MAX);
+        for invalid in 2..=10 {
+            assert_eq!(decode(invalid), 0, "fixture {invalid}");
+        }
     }
 
     #[tokio::test]

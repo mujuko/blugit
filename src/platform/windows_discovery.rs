@@ -286,12 +286,20 @@ fn generation(bytes: &[u8]) -> u64 {
             return 0;
         };
         if attribute == 0x0200 {
-            if found.is_some() || kind != 1 || value.len() != 8 {
+            if found.is_some() || kind != 6 {
                 return 0;
             }
-            found = Some(u64::from_be_bytes(
-                value.try_into().expect("checked length"),
-            ));
+            // IOBluetooth's published uint64 swaps its 32-bit words on the
+            // wire. A sequence of two network-order uint32s survives its IPC.
+            let Some((1, [h0, h1, h2, h3], tail)) = element(value) else {
+                return 0;
+            };
+            let Some((1, [l0, l1, l2, l3], [])) = element(tail) else {
+                return 0;
+            };
+            let high = u32::from_be_bytes([*h0, *h1, *h2, *h3]);
+            let low = u32::from_be_bytes([*l0, *l1, *l2, *l3]);
+            found = Some((u64::from(high) << 32) | u64::from(low));
         }
         fields = rest;
     }
@@ -317,18 +325,45 @@ mod tests {
     }
     #[test]
     fn metadata_is_only_a_bounded_hint_and_malformed_records_are_ignored() {
-        let mut record = vec![0x35, 12, 0x09, 0x02, 0x00, 0x0b];
-        record.extend_from_slice(&1794134000123u64.to_be_bytes());
+        let timestamp = 1794134000123u64.to_be_bytes();
+        let mut record = vec![0x35, 15, 0x09, 0x02, 0x00, 0x35, 10, 0x0a];
+        record.extend_from_slice(&timestamp[..4]);
+        record.push(0x0a);
+        record.extend_from_slice(&timestamp[4..]);
         assert_eq!(generation(&record), 1794134000123);
-        let mut extended = vec![0x35, 16, 0x09, 0x01, 0x01, 0];
+        let mut extended = vec![0x35, 19, 0x09, 0x01, 0x01, 0];
         extended.extend_from_slice(&record[2..]);
         assert_eq!(generation(&extended), 1794134000123);
         for length in 0..record.len() {
             assert_eq!(generation(&record[..length]), 0);
         }
-        record[5] = 0x0a; // Wrong integer width.
+        let mut duplicate = vec![0x35, 30];
+        duplicate.extend_from_slice(&record[2..]);
+        duplicate.extend_from_slice(&record[2..]);
+        assert_eq!(generation(&duplicate), 0);
+        record[7] = 0x0b; // Wrong width for the high word.
         assert_eq!(generation(&record), 0);
         assert_eq!(generation(&[0x37, 255, 255, 255, 255]), 0);
+    }
+    #[test]
+    fn publication_timestamp_matches_the_actual_macos_sdp_wire_record() {
+        // Captured through Windows SDP from an owned, temporary macOS record.
+        // 0x0200 is [uint32 high, uint32 low]; the following uint64 experiments
+        // (0x0201/0x0202) demonstrate the SDK's word swap and are ignored.
+        let wire = hex::decode(concat!(
+            "35a10900000a4f4977c009000135111c35c576b39f1148ec9dc2e826e3572c19",
+            "0900020a000000000900053503191002090006352409656e09006a0901000966",
+            "7209006a09011009646509006a090120096a6109006a09013009000808ff0901",
+            "002519626c756769742d7364702d656e636f64696e672d70726f626509020035",
+            "0a0a000001a10abbe66c6d0902010bbbe66c6d000001a10902020bbbe66c6d000001a1"
+        ))
+        .unwrap();
+        assert_eq!(generation(&wire), 1794153802861);
+        // Do not rank the malformed uint64 form above current publications.
+        assert_eq!(
+            generation(&hex::decode("350c0902000bbbe66c6d000001a1").unwrap()),
+            0
+        );
     }
     #[test]
     fn pointers_outside_the_provider_buffer_are_rejected() {
