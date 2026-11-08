@@ -25,7 +25,6 @@ static BOOL Guest = NO;
 static BOOL ParentGone = NO;
 static IOBluetoothSDPServiceRecord *PublishedRecord;
 static IOBluetoothUserNotification *PublishedNotification;
-static IOBluetoothUserNotification *DiagnosticNotification;
 static dispatch_source_t TerminationSource;
 
 // IOBluetooth can return the requested channel even when another blugit
@@ -63,7 +62,6 @@ int blugit_test_reserve_channel(const char *directory, int requested, int *selec
 #endif
 
 static void ReleaseService(void) {
-    [DiagnosticNotification unregister]; DiagnosticNotification = nil;
     [PublishedNotification unregister]; PublishedNotification = nil;
     if (PublishedRecord) {
         BluetoothSDPServiceRecordHandle handle = 0;
@@ -416,11 +414,6 @@ int main(int argc, char **argv) {
 @property(nonatomic) BluetoothRFCOMMChannelID expected;
 @end
 @implementation Listener
-- (void)observed:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
-    (void)notification;
-    // Observe only: never claim, change the delegate, or close another service.
-    fprintf(stderr, "blugit Bluetooth: observed channel=%u incoming=%d open=%d object=%llu expected=%u\n", channel.getChannelID, channel.isIncoming, channel.isOpen, (unsigned long long)channel.getObjectID, self.expected);
-}
 - (void)opened:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
     // Registration can synchronously report already-open channels with another
     // notification handle. Never attach or close a channel we did not request.
@@ -448,15 +441,32 @@ int main(int argc, char **argv) {
 static NSDictionary *ServiceRecord(int channel) {
     uuid_t bytes;
     [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
+    // An unauthenticated ordering hint for stale advertisements. The SSH host
+    // key and share binding remain the authority for accepting a candidate.
+    uint64_t publishedMilliseconds = (uint64_t)(NSDate.date.timeIntervalSince1970 * 1000.0);
     return @{
         @"0001": @[[IOBluetoothSDPUUID uuidWithBytes:bytes length:16]],
         @"0004": @[
             @[[IOBluetoothSDPUUID uuid16:0x0100]],
             @[[IOBluetoothSDPUUID uuid16:0x0003], @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @(channel)}]
         ],
-        @"0100": @"blugit"
+        @"0100": @"blugit",
+        @"0200": @{@"DataElementType": @1, @"DataElementSize": @8, @"DataElementValue": @(publishedMilliseconds)}
     };
 }
+
+#ifdef BLUGIT_TEST_TRANSPORT
+// Decode through the SDK to catch a wrong SDP type, width, or NSNumber
+// conversion without publishing a service or initializing the radio.
+uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *size) {
+    @autoreleasepool {
+        IOBluetoothSDPDataElement *element = [IOBluetoothSDPDataElement withElementValue:ServiceRecord(10)[@"0200"]];
+        *type = element.getTypeDescriptor;
+        *size = element.getSize;
+        return element.getNumberValue.unsignedLongLongValue;
+    }
+}
+#endif
 
 int blugit_macos_main(int argc, const char **argv) {
     @autoreleasepool {
@@ -505,13 +515,8 @@ int blugit_macos_main(int argc, const char **argv) {
             if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
                 BluetoothSDPServiceRecordHandle handle = 0;
                 IOReturn status = [PublishedRecord getServiceRecordHandle:&handle];
-                fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x status=0x%x\n", reserved, handle, status);
-                // Creating framework channel wrappers can affect their lifetime.
-                // Keep this experiment separate from ordinary diagnostic logs.
-                if (getenv("BLUGIT_BLUETOOTH_OBSERVE_ALL")) {
-                    DiagnosticNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(observed:channel:)];
-                    if (!DiagnosticNotification) fprintf(stderr, "blugit Bluetooth: diagnostic observer registration failed\n");
-                }
+                uint64_t generation = [PublishedRecord getAttributeDataElement:0x0200].getNumberValue.unsignedLongLongValue;
+                fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x generation=%llu status=0x%x\n", reserved, handle, (unsigned long long)generation, status);
             }
             PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
             if (!PublishedNotification) { ReleaseService(); Fail(@"Cannot listen on allocated RFCOMM channel"); }
