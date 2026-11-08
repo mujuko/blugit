@@ -67,7 +67,11 @@ pub(crate) async fn discovery_channels(address: Address) -> Vec<Channel> {
     {
         windows_discovery::candidates(address).await
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        native::discovery_channels(address).await
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = address;
         Vec::new()
