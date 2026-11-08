@@ -36,8 +36,11 @@ cargo test --locked --features test-transport
 cargo build --release --locked
 ```
 
+`BLUGIT_BLUETOOTH_DIAGNOSTICS=1` を指定すると、キャッシュ接続と候補ごとの失敗理由、macOSの初期化状態を追加表示する。認証条件や登録の更新条件は変わらない。
+
 OpenSSH相互運用は `ssh` が未導入の場合のみスキップする。
 [main `af0663f` のCI](https://github.com/mujuko/blugit/actions/runs/42421510829)でもWindowsの全61件、macOSの全66件、Linuxの全61件と、各OSのfmt・Clippy・releaseビルドが成功した。
+専用ヘルパー追加後の[main `219c519` のCI](https://github.com/mujuko/blugit/actions/runs/42422653588)も全OS成功し、macOSは全67件となった。
 Linuxの実Bluetooth検証は未実施である。
 
 ## Windowsホスト／Macゲストの実Bluetooth検証
@@ -52,6 +55,7 @@ Linuxの実Bluetooth検証は未実施である。
 | 同じホスト・共有を4から6へ移動、Macの既存名でfetch | **再登録なしで成功（37.076秒）**。保存番号が6へ更新され、アドレス・共有ID・鍵・originを維持 |
 | 自動更新後に再fetch | **1.312秒で成功**。保存済み番号へ直接再接続 |
 | 別の検証共有へ8 MiBのpush | 成功。転送中の停止とは別の試行 |
+| 専用ヘルパーへの分離と許可後、同じ番号5でWindowsホストを再起動 | **fetchが1.103秒、終了コード0で成功**。登録名と接続先は不変 |
 
 検証用の変更は `codex/validation-mac-20261108` 等の検証ブランチへ保存した。
 Windows側bareリポジトリのmainは変更していない。
@@ -74,7 +78,9 @@ GitとmacOSの補助プロセスを独立したプロセスグループへ分離
 
 Windowsでは、実際のCLI・SSH・Git・待機中の受信hookを使い、ネイティブの `CTRL_C_EVENT` を送るループバック検証が成功した。
 ホストがhookの完了を待ち、受付停止後の出力をゲストへ届け、pushとホストがともに終了コード0で完了した。
-これはWindowsの信号処理とGitの完了待ちの検証であり、修正後のBluetooth経由の停止試験は別途必要。
+修正後は実Bluetoothでも同じ試験が成功した。Macの事前fetchは1.422秒、pushは2.753秒で終了コード0となり、停止後のhook出力も届いた。
+Windowsホストが信号後も生存して1接続の完了を待ち、解放後に終了コード0で終了した。
+bare側のmainは送信した `48b24b7d33887bdd11b42ffa03c046034ffb8fb3` と一致し、fsckも成功した。
 
 ### Macからの再接続で初期化待ち
 
@@ -84,24 +90,37 @@ Mac補助プロセスのサンプルでは、RFCOMM接続呼出しより前の `
 Rust本体を補助アプリへコピーする方式ではRust側の更新でも許可対象のコードが変わるため、専用の小さな実行ファイルへ分離した。
 約84 KiBの専用ヘルパーはdebug／release・異なるビルド先でもSHA-256が一致し、Rust本体のバイト列だけを変える再ビルドと元へ戻す再ビルドでも一致した。
 AppKitの起動処理と許可待ちの案内、電源・許可状態を区別するエラーを追加し、初期化前から親の終了を監視する。
-この修正後の実機初期化・許可とGit再接続は確認中である。ネイティブヘルパー自体の更新時にmacOSの許可が不要になる保証はしない。
-そのため、この再接続を前提とするBluetooth経由のCtrl+C再試験は未完了。
+ユーザーがmacOSのBluetooth利用を許可した後、既存demoへのfetchが1.268秒、終了コード0で成功した。
+ログは `authorization=allowed` となり、初期化・SSH認証・Git転送まで完了した。アドレス・共有ID・チャネル6・alias・originは変更せず、再登録も行っていない。
+ネイティブヘルパー自体の更新時にmacOSの許可が不要になる保証はしない。
 
 ## 逆方向と残る実機確認
 
 Macホスト／Windowsゲストでは、登録と初回cloneは成功した。
-その後のWindowsからの3 MiBのpush、Mac側での変更をWindowsへpullする試験は未完了。
-Macで番号の解放・再確保は確認しているが、その後のGit再接続まで含めた合格とは区別する。
+専用ヘルパー版でもWindowsからの3 MiBのpushとfresh cloneが成功した。
+検証ブランチ `codex/validation-windows-20261108` のコミットは `0e7f4eac46019d3640c20ab4f93530eee62c9408`、バイナリのSHA-256は `a9aeed438f8dd1b764cc4907f53ca7b837f940c43e9ecb084b5b971b0dc931f1` で、再clone先でも一致し、fsckも成功した。
+Macのローカル作業コピーから `mac-origin.txt` を追加し、同じ検証ブランチへpushした変更をWindowsでpullできた。
+コミット `15b01f663f3f6a6f0441778abb2ca03a443b48ef`、Git blobのSHA-256、既存3 MiBファイル、fsckが一致した。
+Macホストを4から8へ移動した後のWindowsからの自動追従は失敗し、調査中である。既存aliasは4のまま保持され、鍵・共有IDの上書きはなかった。
+
+8番だけへの低レベル接続ではRFCOMMが2.169秒で成立した一方、SSH識別子を送っても12秒以内に応答がなく、Macの全チャネル通知observer・Unix bridge・Rust接続処理のログにも到達が見られなかった。
+9番だけへの別試行では0.994秒で接続し、Macのobserverが9番のincomingを確認したが、8番の受付条件には一致せず、即EOFとなった。8番の代わりに9番を採用する変更は行っていない。
+
+Windowsから既知Macのblugit UUIDだけを `WSALookupServiceBegin/Next` と `LUP_FLUSHCACHE` で照会したところ、8番・4番・2番・1番など16件の広告が返った。
+正常停止を確認した現行レコード `0x4f4970f0`（8番）も停止後の再照会に残って見えた。Macの全blugit／検証用Pythonホストの残存は見当たらず、ローカルの削除結果とWindows側キャッシュの切り分けを継続している。
+SDPの広告から取得した候補もSSHホスト鍵と共有IDの認証が必要であり、広告自体を生存や本人確認の証拠にはしない。
+
+Macホストの受付を稼働させたまま、Macゲストとして既存のWindowsホストへfetchする操作も1.187秒・終了コード0で成功した。Macホストは終了せず、受付を維持した。
+この確認では両方向のGit転送自体は重ねていない。
 
 | 残る項目 | 合格条件 |
 |---|---|
-| Mac初期化待ちの解消 | 同じ番号で再起動したホストへ繰り返しfetchできる |
-| 修正後のBluetooth転送中のCtrl+C | 1回目で転送と末尾出力が完了してから終了し、2回目で中断する |
-| Macホスト／Windowsゲスト | バイナリpush・pullと再接続、ハッシュ・コミット・fsckの一致 |
+| Bluetooth転送中のCtrl+C | Windowsホストの1回目は成功。Macホストでの完了待ちと、2回目の中断を実機確認する |
+| Macホスト／Windowsゲストのチャネル変更 | 4→8変更後にSSHまで到達すること（4番での3 MiB push・pullは成功） |
 | 実機でのrevoke・共有切替 | 新規接続を拒否し、既存の登録とGitデータを保持する（自動テストは成功） |
 | Linux | 実アダプターで割当・登録・Git転送（CIでのビルド・自動テストは成功） |
 | ネットワークを切った環境 | Wi-Fi／Ethernetなしで同じ登録・Git操作が完了する |
 
 今回の遠隔共同検証では制御用ネットワークを維持したため、完全なネットワーク切断試験は実施していない。
-SDPによる候補取得のMac実機評価も未完了。今回の自動解決はSDPに依存しない認証付きの逐次探索である。
+WindowsからMac広告を取得するSDP診断は上記のとおり実施した。macOSゲスト側でSDPを再取得する経路は未検証。今回の自動解決はSDPに依存しない認証付きの逐次探索である。
 SSH切替前の状態との互換性は用意しない。両端末を更新し、旧形式の状態を使っていた場合は新しい状態ディレクトリで登録する。
