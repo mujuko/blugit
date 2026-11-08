@@ -468,6 +468,59 @@ uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *size) 
 }
 #endif
 
+@interface SDPQuery : NSObject
+@property(nonatomic, strong) IOBluetoothDevice *device;
+@property(atomic) BOOL done;
+@property(atomic) IOReturn status;
+@end
+@implementation SDPQuery
+- (void)sdpQueryComplete:(IOBluetoothDevice *)device status:(IOReturn)status {
+    if (device != self.device) return;
+    self.status = status;
+    self.done = YES;
+}
+@end
+
+static void DiscoverChannels(NSString *address) {
+    IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
+    __attribute__((objc_precise_lifetime)) SDPQuery *query = [SDPQuery new];
+    query.device = device;
+    uuid_t bytes;
+    [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
+    NSArray *uuids = @[[IOBluetoothSDPUUID uuidWithBytes:bytes length:16]];
+    IOReturn status = device ? [device performSDPQuery:query uuids:uuids] : kIOReturnBadArgument;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:6];
+    while (status == kIOReturnSuccess && !query.done && deadline.timeIntervalSinceNow > 0) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+    uint64_t generation[31] = {0};
+    BOOL seen[31] = {NO};
+    if (status == kIOReturnSuccess && query.done && query.status == kIOReturnSuccess) {
+        for (IOBluetoothSDPServiceRecord *record in device.services) {
+            BluetoothRFCOMMChannelID channel = 0;
+            if (![record matchesUUIDArray:uuids] || [record getRFCOMMChannelID:&channel] != kIOReturnSuccess || channel < 1 || channel > 30) continue;
+            IOBluetoothSDPDataElement *element = [record getAttributeDataElement:0x0200];
+            uint64_t value = element.getTypeDescriptor == 1 && element.getSize == 8 ? element.getNumberValue.unsignedLongLongValue : 0;
+            seen[channel] = YES;
+            generation[channel] = MAX(generation[channel], value);
+        }
+    } else if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+        fprintf(stderr, "blugit Bluetooth: SDP query incomplete start=0x%x done=%d status=0x%x\n", status, query.done, query.status);
+    }
+    // One bounded line, at most 30 unique valid channels. These are hints only.
+    printf("CHANNELS");
+    for (int count = 0; count < 30; ++count) {
+        int selected = 0;
+        for (int channel = 1; channel <= 30; ++channel) {
+            if (seen[channel] && (!selected || generation[channel] > generation[selected])) selected = channel;
+        }
+        if (!selected) break;
+        printf("\t%d", selected);
+        seen[selected] = NO;
+    }
+    puts("");
+}
+
 int blugit_macos_main(int argc, const char **argv) {
     @autoreleasepool {
         signal(SIGPIPE, SIG_IGN);
@@ -482,6 +535,7 @@ int blugit_macos_main(int argc, const char **argv) {
         NSString *address = IOBluetoothHostController.defaultController.addressAsString;
         if (!address) Fail(@"No local Bluetooth address");
         if ([mode isEqualToString:@"address"]) { puts(address.UTF8String); return 0; }
+        if ([mode isEqualToString:@"discover"] && argc == 2) { DiscoverChannels(@(argv[1])); return 0; }
         if ([mode isEqualToString:@"host"] && argc == 3) {
             int requested = atoi(argv[2]);
             if (requested < 0 || requested > 30) Fail(@"Invalid RFCOMM channel");

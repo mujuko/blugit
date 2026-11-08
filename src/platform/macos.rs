@@ -17,7 +17,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader, ReadBuf};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 
 unsafe extern "C" {
     fn blugit_macos_main(argc: i32, argv: *const *const libc::c_char) -> i32;
@@ -150,6 +150,51 @@ async fn line(output: &mut BufReader<tokio::net::UnixStream>) -> Result<String> 
 pub async fn local_address() -> Result<Address> {
     let (_process, mut output) = start(&["address".into()]).await?;
     line(&mut output).await?.parse()
+}
+
+const DISCOVERY_OUTPUT_LIMIT: usize = 128;
+
+fn parse_discovery_channels(bytes: &[u8]) -> Result<Vec<Channel>> {
+    ensure!(
+        bytes.len() <= DISCOVERY_OUTPUT_LIMIT,
+        "SDP helper output is too large"
+    );
+    let line = std::str::from_utf8(bytes)?
+        .strip_suffix('\n')
+        .context("incomplete SDP helper response")?;
+    ensure!(!line.contains(['\n', '\r']), "unexpected SDP helper output");
+    let mut fields = line.split('\t');
+    ensure!(
+        fields.next() == Some("CHANNELS"),
+        "invalid SDP helper response"
+    );
+    let mut channels = Vec::new();
+    for field in fields {
+        let channel = Channel::try_from(field.parse::<u8>()?)?;
+        ensure!(!channels.contains(&channel), "duplicate SDP channel");
+        channels.push(channel);
+    }
+    Ok(channels)
+}
+
+async fn read_discovery_channels(output: &mut (impl AsyncRead + Unpin)) -> Result<Vec<Channel>> {
+    let mut bytes = Vec::new();
+    output
+        .take((DISCOVERY_OUTPUT_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    parse_discovery_channels(&bytes)
+}
+
+pub(crate) async fn discovery_channels(address: Address) -> Vec<Channel> {
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        // The process guard also owns cancellation while Bluetooth/TCC or the
+        // OS SDP query is pending. No blocking query survives in this process.
+        let (_process, mut output) = start(&["discover".into(), address.to_string()]).await?;
+        read_discovery_channels(&mut output).await
+    })
+    .await;
+    result.ok().and_then(Result::ok).unwrap_or_default()
 }
 
 struct Bridge {
@@ -305,6 +350,65 @@ mod tests {
         ) -> i32;
         fn blugit_test_sdp_publication_generation(type_descriptor: *mut u32, size: *mut u32)
         -> u64;
+    }
+
+    #[test]
+    fn discovery_control_response_preserves_order_and_rejects_invalid_candidates() {
+        let channels = super::parse_discovery_channels(b"CHANNELS\t30\t10\t1\n").unwrap();
+        assert_eq!(
+            channels
+                .iter()
+                .map(|channel| channel.get())
+                .collect::<Vec<_>>(),
+            [30, 10, 1]
+        );
+        assert!(
+            super::parse_discovery_channels(b"CHANNELS\n")
+                .unwrap()
+                .is_empty()
+        );
+        let all_channels = format!(
+            "CHANNELS{}\n",
+            (1..=30)
+                .map(|number| format!("\t{number}"))
+                .collect::<String>()
+        );
+        assert_eq!(
+            super::parse_discovery_channels(all_channels.as_bytes())
+                .unwrap()
+                .len(),
+            30
+        );
+        for response in [
+            &b"CHANNELS\t0\n"[..],
+            &b"CHANNELS\t31\n"[..],
+            &b"CHANNELS\t256\n"[..],
+            &b"CHANNELS\t2\t2\n"[..],
+            &b"CHANNELS\t2\nCHANNELS\t3\n"[..],
+            &b"CHANNELS\t2"[..],
+            &b"READY\n"[..],
+            &b"CHANNELS\t\xff\n"[..],
+        ] {
+            assert!(
+                super::parse_discovery_channels(response).is_err(),
+                "{response:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_control_reader_bounds_output_before_peer_closes() -> anyhow::Result<()> {
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer.write_all(&[b'x'; 256]).await?;
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::read_discovery_channels(&mut reader),
+        )
+        .await?
+        .unwrap_err();
+        assert!(error.to_string().contains("too large"));
+        drop(writer);
+        Ok(())
     }
 
     #[test]
