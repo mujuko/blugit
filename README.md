@@ -11,7 +11,7 @@ LANやインターネットがない場所でも、`git clone` / `git pull` / `g
 SSHはアプリに組み込まれているため、OSのSSHサーバー設定やポート開放は不要です。
 同時に公開できるリポジトリは1つです。
 
-現在は実機検証中です。Windows・macOS・Linuxのビルドと自動テスト、Windowsホスト／MacゲストのBluetoothでのclone・push・pullを確認しています。
+現在は実機検証中です。Windows・macOS・Linuxのビルドと自動テスト、Windows／Macの両方向のBluetoothでのclone・push・pullを確認しています。
 Linuxと残る実機項目の確認範囲は、[検証記録と実機確認手順](docs/validation.md)を参照してください。
 独立したセキュリティ監査も未実施です。認証方式と採用ライブラリの制約は[設計](docs/architecture.md)に記載しています。
 
