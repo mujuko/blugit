@@ -345,6 +345,7 @@ pub async fn connect(endpoint: &Contact) -> Result<Connection> {
 
 #[cfg(all(test, feature = "test-transport"))]
 mod tests {
+    use anyhow::Context as _;
     use std::{
         io::{self, Read, Write},
         net::Shutdown,
@@ -354,7 +355,7 @@ mod tests {
         },
         path::Path,
         process::Command,
-        time::Duration,
+        time::{Duration, Instant},
     };
     use tokio::io::AsyncWriteExt;
 
@@ -507,9 +508,27 @@ mod tests {
         Ok((unsafe { OwnedFd::from_raw_fd(fd) }, selected))
     }
 
+    fn reserve_after_close(directory: &Path, requested: i32) -> io::Result<(OwnedFd, i32)> {
+        // Parallel tests spawn processes. CLOEXEC closes an inherited lock fd at
+        // exec, but a child between fork and exec can briefly keep it alive
+        // after our owner closes. Still test close-based release, with a bound.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match reserve(directory, requested) {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::EADDRINUSE)
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => return result,
+            }
+        }
+    }
+
     #[test]
     fn channel_reservations_reject_conflicts_in_another_process_and_release_on_close()
-    -> io::Result<()> {
+    -> anyhow::Result<()> {
         const CHILD_DIRECTORY: &str = "BLUGIT_TEST_CHANNEL_RESERVATION_DIRECTORY";
         if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
             assert_eq!(
@@ -521,7 +540,8 @@ mod tests {
             return Ok(());
         }
         let directory = tempfile::tempdir()?;
-        let (owner, selected) = reserve(directory.path(), 4)?;
+        let (owner, selected) =
+            reserve(directory.path(), 4).context("reserve channel 4 initially")?;
         assert_eq!(selected, 4);
         let output = Command::new(std::env::current_exe()?)
             .args([
@@ -541,16 +561,22 @@ mod tests {
             Some(libc::EADDRINUSE)
         );
         drop(owner);
-        assert_eq!(reserve(directory.path(), 4)?.1, 4);
+        assert_eq!(
+            reserve_after_close(directory.path(), 4)
+                .context("reacquire channel 4 after closing its owner")?
+                .1,
+            4
+        );
         Ok(())
     }
 
     #[test]
-    fn automatic_channel_reservations_are_distinct_and_report_exhaustion() -> io::Result<()> {
+    fn automatic_channel_reservations_are_distinct_and_report_exhaustion() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let mut owners = Vec::new();
         for expected in 1..=30 {
-            let (owner, selected) = reserve(directory.path(), 0)?;
+            let (owner, selected) = reserve(directory.path(), 0)
+                .with_context(|| format!("reserve automatic channel {expected} of 30"))?;
             assert_eq!(selected, expected);
             owners.push(owner);
         }
@@ -559,7 +585,12 @@ mod tests {
             Some(libc::EADDRINUSE)
         );
         drop(owners.remove(6));
-        assert_eq!(reserve(directory.path(), 0)?.1, 7);
+        assert_eq!(
+            reserve_after_close(directory.path(), 0)
+                .context("reacquire automatic channel 7 after closing its owner")?
+                .1,
+            7
+        );
         Ok(())
     }
 
