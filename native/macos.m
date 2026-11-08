@@ -25,6 +25,7 @@ static BOOL Guest = NO;
 static BOOL ParentGone = NO;
 static IOBluetoothSDPServiceRecord *PublishedRecord;
 static IOBluetoothUserNotification *PublishedNotification;
+static IOBluetoothUserNotification *DiagnosticNotification;
 static dispatch_source_t TerminationSource;
 
 // IOBluetooth can return the requested channel even when another blugit
@@ -62,6 +63,7 @@ int blugit_test_reserve_channel(const char *directory, int requested, int *selec
 #endif
 
 static void ReleaseService(void) {
+    [DiagnosticNotification unregister]; DiagnosticNotification = nil;
     [PublishedNotification unregister]; PublishedNotification = nil;
     [PublishedRecord removeServiceRecord]; PublishedRecord = nil;
 }
@@ -270,13 +272,18 @@ int main(int argc, char **argv) {
 }
 - (BOOL)attach:(IOBluetoothRFCOMMChannel *)channel path:(NSString *)path {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return NO;
+    if (fd < 0) { fprintf(stderr, "blugit Bluetooth: local socket failed: %s\n", strerror(errno)); return NO; }
     struct sockaddr_un address = {0};
     address.sun_family = AF_UNIX;
     const char *name = path.fileSystemRepresentation;
-    if (strlen(name) >= sizeof(address.sun_path)) { close(fd); return NO; }
+    if (strlen(name) >= sizeof(address.sun_path)) { fprintf(stderr, "blugit Bluetooth: local socket path is too long\n"); close(fd); return NO; }
     strlcpy(address.sun_path, name, sizeof(address.sun_path));
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) { close(fd); return NO; }
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        fprintf(stderr, "blugit Bluetooth: local connect failed: %s\n", strerror(errno)); close(fd); return NO;
+    }
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+        fprintf(stderr, "blugit Bluetooth: local stream attached channel=%u object=%llu fd=%d\n", channel.getChannelID, (unsigned long long)channel.getObjectID, fd);
+    }
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
     self.fd = fd;
@@ -394,13 +401,23 @@ int main(int argc, char **argv) {
 
 @interface Listener : NSObject
 @property(nonatomic, strong) NSString *path;
+@property(nonatomic) BluetoothRFCOMMChannelID expected;
 @end
 @implementation Listener
+- (void)observed:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
+    (void)notification;
+    // Observe only: never claim, change the delegate, or close another service.
+    fprintf(stderr, "blugit Bluetooth: observed channel=%u incoming=%d open=%d object=%llu expected=%u\n", channel.getChannelID, channel.isIncoming, channel.isOpen, (unsigned long long)channel.getObjectID, self.expected);
+}
 - (void)opened:(IOBluetoothUserNotification *)notification channel:(IOBluetoothRFCOMMChannel *)channel {
     (void)notification;
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+        fprintf(stderr, "blugit Bluetooth: incoming channel=%u incoming=%d open=%d object=%llu expected=%u\n", channel.getChannelID, channel.isIncoming, channel.isOpen, (unsigned long long)channel.getObjectID, self.expected);
+    }
     // macOS cannot safely hold two RFCOMM channels to the same device.
     for (Bridge *bridge in LiveBridges) {
         if ([bridge.channel.getDevice.addressString isEqualToString:channel.getDevice.addressString]) {
+            if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: rejected duplicate peer bridge\n");
             [channel closeChannel]; return;
         }
     }
@@ -465,6 +482,14 @@ int blugit_macos_main(int argc, const char **argv) {
                 first = candidate + 1;
             }
             if (!PublishedRecord) Fail(@"Cannot allocate a free RFCOMM channel");
+            listener.expected = reserved;
+            if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
+                BluetoothSDPServiceRecordHandle handle = 0;
+                IOReturn status = [PublishedRecord getServiceRecordHandle:&handle];
+                fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x status=0x%x\n", reserved, handle, status);
+                DiagnosticNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(observed:channel:)];
+                if (!DiagnosticNotification) fprintf(stderr, "blugit Bluetooth: diagnostic observer registration failed\n");
+            }
             PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
             if (!PublishedNotification) { ReleaseService(); Fail(@"Cannot listen on allocated RFCOMM channel"); }
             printf("READY\t%s\t%d\n", address.UTF8String, reserved);
