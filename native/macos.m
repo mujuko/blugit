@@ -271,6 +271,8 @@ int main(int argc, char **argv) {
 @property(atomic) BOOL closed;
 @property(nonatomic) size_t mtu;
 @property(nonatomic) NSUInteger pending;
+@property(nonatomic) BOOL loggedLocalRead;
+@property(nonatomic) BOOL loggedRFCOMMData;
 - (BOOL)attach:(IOBluetoothRFCOMMChannel *)channel path:(NSString *)path;
 - (void)finish;
 @end
@@ -292,7 +294,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "blugit Bluetooth: local connect failed: %s\n", strerror(errno)); close(fd); return NO;
     }
     if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
-        fprintf(stderr, "blugit Bluetooth: local stream attached channel=%u object=%llu fd=%d\n", channel.getChannelID, (unsigned long long)channel.getObjectID, fd);
+        fprintf(stderr, "blugit Bluetooth: local stream attached bridge=%p channel=%u object=%llu fd=%d pending=%lu\n", (__bridge void *)self, channel.getChannelID, (unsigned long long)channel.getObjectID, fd, (unsigned long)self.pending);
     }
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
@@ -303,7 +305,8 @@ int main(int argc, char **argv) {
     int outputFD = dup(fd);
     if (outputFD < 0) { close(fd); self.fd = -1; return NO; }
     self.output = dispatch_io_create(DISPATCH_IO_STREAM, outputFD, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(int error) { (void)error; close(outputFD); });
-    [channel setDelegate:self];
+    IOReturn delegateStatus = [channel setDelegate:self];
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: bridge=%p delegate status=0x%x channel=%u object=%llu\n", (__bridge void *)self, delegateStatus, channel.getChannelID, (unsigned long long)channel.getObjectID);
     [LiveBridges addObject:self];
     if (self.early.length) {
         NSData *early = [self.early copy];
@@ -321,8 +324,15 @@ int main(int argc, char **argv) {
             size_t mtu = bridge.mtu;
             NSMutableData *buffer = [NSMutableData dataWithLength:mtu];
             ssize_t count = ReadWhenReady(fd, buffer.mutableBytes, mtu);
+            int readError = count < 0 ? errno : 0;
+            if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS") && !bridge.loggedLocalRead) {
+                bridge.loggedLocalRead = YES;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    fprintf(stderr, "blugit Bluetooth: bridge=%p first local read channel=%u object=%llu length=%zd pending=%lu closed=%d\n", (__bridge void *)bridge, bridge.channel.getChannelID, (unsigned long long)bridge.channel.getObjectID, count, (unsigned long)bridge.pending, bridge.closed);
+                });
+            }
             if (count <= 0) {
-                int error = count < 0 ? errno : 0;
+                int error = readError;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     if (error) fprintf(stderr, "blugit Bluetooth: local stream read failed: %s\n", strerror(error));
                     [weak finish];
@@ -366,7 +376,10 @@ int main(int argc, char **argv) {
     [self rfcommChannelWriteComplete:channel refcon:refcon status:status bytesWritten:self.writing.length];
 }
 - (void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)channel data:(void *)data length:(size_t)length {
-    (void)channel;
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS") && !self.loggedRFCOMMData) {
+        self.loggedRFCOMMData = YES;
+        fprintf(stderr, "blugit Bluetooth: bridge=%p first RFCOMM data channel=%u object=%llu length=%zu pending=%lu closed=%d\n", (__bridge void *)self, channel.getChannelID, (unsigned long long)channel.getObjectID, length, (unsigned long)self.pending, self.closed);
+    }
     if (self.closed) return;
     if (!self.output) {
         if (self.early.length + length > 8 * 1024 * 1024) { [self finish]; return; }
@@ -390,13 +403,14 @@ int main(int argc, char **argv) {
     });
 }
 - (void)rfcommChannelClosed:(IOBluetoothRFCOMMChannel *)channel {
-    (void)channel;
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: bridge=%p closed channel=%u object=%llu pending=%lu already-closed=%d\n", (__bridge void *)self, channel.getChannelID, (unsigned long long)channel.getObjectID, (unsigned long)self.pending, self.closed);
     if (self.output) {
         __weak Bridge *weak = self;
         dispatch_io_barrier(self.output, ^{ dispatch_async(dispatch_get_main_queue(), ^{ [weak finish]; }); });
     } else { [self finish]; }
 }
 - (void)finish {
+    if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) fprintf(stderr, "blugit Bluetooth: bridge=%p finish channel=%u object=%llu pending=%lu already-closed=%d\n", (__bridge void *)self, self.channel.getChannelID, (unsigned long long)self.channel.getObjectID, (unsigned long)self.pending, self.closed);
     if (self.closed) return;
     self.closed = YES;
     [self.channel setDelegate:nil];
@@ -438,6 +452,32 @@ int main(int argc, char **argv) {
 }
 @end
 
+static NSDictionary *SDPUnsigned32(uint32_t value) {
+    return @{@"DataElementType": @1, @"DataElementSize": @4, @"DataElementValue": @(value)};
+}
+
+static NSArray *PublicationGenerationValue(uint64_t value) {
+    // The macOS SDP daemon swaps the 32-bit halves of uint64 elements, even
+    // when supplied as network-order NSData. Two uint32 elements survive the
+    // real SDK publication path without that conversion.
+    return @[SDPUnsigned32((uint32_t)(value >> 32)), SDPUnsigned32((uint32_t)value)];
+}
+
+static uint64_t ReadPublicationGeneration(IOBluetoothSDPDataElement *element) {
+    if (element.getTypeDescriptor != 6) return 0;
+    NSArray *parts = element.getArrayValue;
+    if (parts.count != 2) return 0;
+    uint64_t values[2];
+    for (NSUInteger index = 0; index < 2; ++index) {
+        IOBluetoothSDPDataElement *part = parts[index];
+        if (![part isKindOfClass:IOBluetoothSDPDataElement.class] || part.getTypeDescriptor != 1 || part.getSize != 4) return 0;
+        NSNumber *number = part.getNumberValue;
+        if (!number || number.unsignedLongLongValue > UINT32_MAX) return 0;
+        values[index] = number.unsignedLongLongValue;
+    }
+    return (values[0] << 32) | values[1];
+}
+
 static NSDictionary *ServiceRecord(int channel) {
     uuid_t bytes;
     [[[NSUUID alloc] initWithUUIDString:ServiceUUID] getUUIDBytes:bytes];
@@ -451,19 +491,43 @@ static NSDictionary *ServiceRecord(int channel) {
             @[[IOBluetoothSDPUUID uuid16:0x0003], @{@"DataElementType": @1, @"DataElementSize": @1, @"DataElementValue": @(channel)}]
         ],
         @"0100": @"blugit",
-        @"0200": @{@"DataElementType": @1, @"DataElementSize": @8, @"DataElementValue": @(publishedMilliseconds)}
+        @"0200": PublicationGenerationValue(publishedMilliseconds)
     };
 }
 
 #ifdef BLUGIT_TEST_TRANSPORT
 // Decode through the SDK to catch a wrong SDP type, width, or NSNumber
 // conversion without publishing a service or initializing the radio.
-uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *size) {
+uint64_t blugit_test_sdp_publication_generation(uint32_t *type, uint32_t *count) {
     @autoreleasepool {
         IOBluetoothSDPDataElement *element = [IOBluetoothSDPDataElement withElementValue:ServiceRecord(10)[@"0200"]];
         *type = element.getTypeDescriptor;
-        *size = element.getSize;
-        return element.getNumberValue.unsignedLongLongValue;
+        *count = (uint32_t)element.getArrayValue.count;
+        return ReadPublicationGeneration(element);
+    }
+}
+
+uint64_t blugit_test_sdp_generation_fixture(uint32_t fixture) {
+    @autoreleasepool {
+        id high = SDPUnsigned32(417), low = SDPUnsigned32(UINT32_C(3152440429));
+        id narrow = @{@"DataElementType": @1, @"DataElementSize": @2, @"DataElementValue": @417};
+        id signedPart = @{@"DataElementType": @2, @"DataElementSize": @4, @"DataElementValue": @417};
+        id value;
+        switch (fixture) {
+            case 0: value = @[high, low]; break; // 1794153802861 ms, asymmetric halves.
+            case 1: value = @[SDPUnsigned32(UINT32_MAX), SDPUnsigned32(UINT32_MAX)]; break;
+            case 2: value = @[]; break;
+            case 3: value = @[high]; break;
+            case 4: value = @[high, low, low]; break;
+            case 5: value = @{@"DataElementType": @1, @"DataElementSize": @8, @"DataElementValue": @1794153802861ULL}; break;
+            case 6: value = @[narrow, low]; break;
+            case 7: value = @[high, narrow]; break;
+            case 8: value = @[signedPart, low]; break;
+            case 9: value = @[high, signedPart]; break;
+            case 10: value = @[@[high], low]; break;
+            default: return 0;
+        }
+        return ReadPublicationGeneration([IOBluetoothSDPDataElement withElementValue:value]);
     }
 }
 #endif
@@ -505,7 +569,7 @@ static void DiscoverChannels(NSString *address) {
             BluetoothRFCOMMChannelID channel = 0;
             if (![record matchesUUIDArray:uuids] || [record getRFCOMMChannelID:&channel] != kIOReturnSuccess || channel < 1 || channel > 30) continue;
             IOBluetoothSDPDataElement *element = [record getAttributeDataElement:0x0200];
-            uint64_t value = element.getTypeDescriptor == 1 && element.getSize == 8 ? element.getNumberValue.unsignedLongLongValue : 0;
+            uint64_t value = ReadPublicationGeneration(element);
             seen[channel] = YES;
             generation[channel] = MAX(generation[channel], value);
         }
@@ -577,7 +641,7 @@ int blugit_macos_main(int argc, const char **argv) {
             if (getenv("BLUGIT_BLUETOOTH_DIAGNOSTICS")) {
                 BluetoothSDPServiceRecordHandle handle = 0;
                 IOReturn status = [PublishedRecord getServiceRecordHandle:&handle];
-                uint64_t generation = [PublishedRecord getAttributeDataElement:0x0200].getNumberValue.unsignedLongLongValue;
+                uint64_t generation = ReadPublicationGeneration([PublishedRecord getAttributeDataElement:0x0200]);
                 fprintf(stderr, "blugit Bluetooth: published channel=%u record=0x%x generation=%llu status=0x%x\n", reserved, handle, (unsigned long long)generation, status);
             }
             PublishedNotification = [IOBluetoothRFCOMMChannel registerForChannelOpenNotifications:listener selector:@selector(opened:channel:) withChannelID:reserved direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
