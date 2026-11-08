@@ -303,6 +303,24 @@ mod tests {
             requested: i32,
             selected: *mut i32,
         ) -> i32;
+        fn blugit_test_sdp_publication_generation(type_descriptor: *mut u32, size: *mut u32)
+        -> u64;
+    }
+
+    #[test]
+    fn sdp_publication_generation_uses_unsigned_eight_byte_epoch_milliseconds() -> anyhow::Result<()>
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let before = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+        let (mut type_descriptor, mut size) = (0, 0);
+        // SAFETY: both output pointers are valid for the native SDK conversion.
+        let generation =
+            unsafe { blugit_test_sdp_publication_generation(&mut type_descriptor, &mut size) };
+        let after = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+        assert_eq!((type_descriptor, size), (1, 8));
+        assert!(generation > u64::from(u32::MAX));
+        assert!((before..=after).contains(&u128::from(generation)));
+        Ok(())
     }
 
     #[tokio::test]
