@@ -163,6 +163,9 @@ fn parse_discovery_channels(bytes: &[u8]) -> Result<Vec<Channel>> {
         .strip_suffix('\n')
         .context("incomplete SDP helper response")?;
     ensure!(!line.contains(['\n', '\r']), "unexpected SDP helper output");
+    if let Some(error) = line.strip_prefix("ERROR\t") {
+        bail!("Bluetooth SDP helper: {error}");
+    }
     let mut fields = line.split('\t');
     ensure!(
         fields.next() == Some("CHANNELS"),
@@ -194,7 +197,21 @@ pub(crate) async fn discovery_channels(address: Address) -> Vec<Channel> {
         read_discovery_channels(&mut output).await
     })
     .await;
-    result.ok().and_then(Result::ok).unwrap_or_default()
+    match result {
+        Ok(Ok(channels)) => channels,
+        Ok(Err(error)) => {
+            if std::env::var_os("BLUGIT_BLUETOOTH_DIAGNOSTICS").is_some() {
+                eprintln!("blugit Bluetooth: SDP discovery failed: {error:#}");
+            }
+            Vec::new()
+        }
+        Err(_) => {
+            if std::env::var_os("BLUGIT_BLUETOOTH_DIAGNOSTICS").is_some() {
+                eprintln!("blugit Bluetooth: SDP discovery timed out after 8 seconds");
+            }
+            Vec::new()
+        }
+    }
 }
 
 struct Bridge {
@@ -354,6 +371,12 @@ mod tests {
 
     #[test]
     fn discovery_control_response_preserves_order_and_rejects_invalid_candidates() {
+        assert!(
+            super::parse_discovery_channels(b"ERROR\tpermission denied\n")
+                .unwrap_err()
+                .to_string()
+                .contains("permission denied")
+        );
         let channels = super::parse_discovery_channels(b"CHANNELS\t30\t10\t1\n").unwrap();
         assert_eq!(
             channels
