@@ -20,6 +20,13 @@ where
         Ok(Err(error)) => error,
         Err(error) => anyhow::Error::from(error).context("cached connection timed out"),
     };
+    let diagnostics = std::env::var_os("BLUGIT_BLUETOOTH_DIAGNOSTICS").is_some();
+    if diagnostics {
+        eprintln!(
+            "blugit: cached RFCOMM channel {}: {initial_error:#}",
+            endpoint.channel.get()
+        );
+    }
     // A legacy loopback test listener has no channel routing. Production never
     // takes this branch; the routed test transport below exercises rediscovery.
     #[cfg(feature = "test-transport")]
@@ -39,17 +46,21 @@ where
             channel,
             ..endpoint.clone()
         };
-        match timeout_at(
+        let error = match timeout_at(
             deadline,
             timeout(CANDIDATE_TIMEOUT, dial(candidate.clone(), true)),
         )
         .await
         {
             Ok(Ok(Ok(session))) => return Ok((session, candidate)),
-            Ok(_) => {}
+            Ok(Ok(Err(error))) => error,
+            Ok(Err(error)) => anyhow::Error::from(error).context("candidate timed out"),
             Err(_) => bail!(
                 "timed out locating the registered repository; cached connection: {initial_error:#}"
             ),
+        };
+        if diagnostics {
+            eprintln!("blugit: RFCOMM channel {number}: {error:#}");
         }
     }
     bail!(
