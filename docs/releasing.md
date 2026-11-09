@@ -36,7 +36,9 @@ Pull Requestでは配布計画と生成ファイルの整合性を検証し、�
 
 1. `Cargo.toml` のバージョンを決め、変更した場合は `cargo check --locked` で確認します。ロックファイルの更新が必要なら `cargo check` で更新し、`Cargo.lock` もコミットしてください。
 2. 通常のCIが通ることと、`dist generate --check` / `dist plan` の成功を確認し、リリース対象のコミットをGitHubへpushします。
-3. そのコミットに `v` + バージョンのタグを付けてpushします。現在の `1.0.0` を初めて公開する例は以下です。
+3. Actionsの `Release check` を対象コミットのブランチで手動実行し、全対象の配布物とインストーラーの生成が成功することを確認します。このワークフローはGitHub Releaseを作成しません。
+4. 初回はリポジトリを公開し、Private vulnerability reportingの有効化と公開設定の確認まで済ませます。
+5. 最後に、そのコミットへ `v` + バージョンのタグを付けてpushします。`1.0.0` の例は以下です。
 
 ```sh
 git tag v1.0.0
@@ -45,7 +47,6 @@ git push origin v1.0.0
 
 `Release` ワークフローが対象OSのビルド、アーカイブ・インストーラー・チェックサムの生成、GitHub Releaseへのアップロードを行います。
 標準の `GITHUB_TOKEN` を使用するため、配布用のシークレットを別途登録する必要はありません。
-初回公開が完了したら、READMEの「初回のGitHub Release公開後」という案内を削除できます。
 
 公開後は、[リリース一覧](https://github.com/mujuko/blugit/releases)で成果物を確認し、READMEのインストールコマンドで両方の実行ファイルが導入されることを確認してください。
 `releases/latest` のインストールURLは最新の安定版を指します。プレリリースは各リリースページに表示されるコマンドを使ってください。

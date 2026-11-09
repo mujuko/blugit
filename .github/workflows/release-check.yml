@@ -1,0 +1,86 @@
+name: Release check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.34.0/cargo-dist-installer.sh | sh
+      - id: plan
+        name: Check generated workflow and plan all targets
+        run: |
+          dist generate --check
+          dist plan --output-format=json > plan-dist-manifest.json
+          echo "matrix=$(jq -c '.ci.github.artifacts_matrix' plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: check-plan
+          path: plan-dist-manifest.json
+
+  build-local:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ join(matrix.targets, ',') }}
+      - name: Install dist
+        run: ${{ matrix.install_dist.run }}
+      - name: Install dependencies
+        if: matrix.packages_install != ''
+        run: ${{ matrix.packages_install }}
+      - name: Build target artifacts
+        run: dist build ${{ matrix.dist_args }} --output-format=json > dist-manifest.json
+      - name: Preserve target manifest
+        shell: bash
+        run: cp dist-manifest.json "target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: check-local-${{ join(matrix.targets, '_') }}
+          path: |
+            target/distrib/*.zip
+            target/distrib/*.tar.xz
+            target/distrib/*.sha256
+            target/distrib/*-dist-manifest.json
+
+  build-global:
+    needs: build-local
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.34.0/cargo-dist-installer.sh | sh
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: check-local-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Generate installers and checksums
+        run: dist build --artifacts=global
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-check-artifacts
+          path: target/distrib/*
