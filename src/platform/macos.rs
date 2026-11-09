@@ -374,11 +374,14 @@ mod tests {
 
     unsafe extern "C" {
         fn blugit_test_dispatch_read(fd: i32, buffer: *mut u8, size: usize) -> isize;
-        fn blugit_test_reserve_channel(
+        fn blugit_test_reserve_unused_channel(
             directory: *const libc::c_char,
             requested: i32,
+            used: u32,
             selected: *mut i32,
         ) -> i32;
+        fn blugit_test_local_services_fixture(fixture: u32, used: *mut u32) -> i32;
+        fn blugit_test_local_getter_signature(fixture: u32) -> i32;
         fn blugit_test_sdp_publication_generation(
             type_descriptor: *mut u32,
             count: *mut u32,
@@ -394,6 +397,47 @@ mod tests {
             actual: i32,
             incoming: i32,
         ) -> i32;
+    }
+
+    #[test]
+    fn local_service_query_fails_closed_without_losing_the_callers_inventory() {
+        for fixture in 0..=32 {
+            // Native error codes distinguish a missing path, ABI mismatch,
+            // invalid return/record/descriptor, count bound, and exception.
+            let expected_error = match fixture {
+                0 | 15 | 17 | 18 | 22 | 23 | 30 | 31 => 0,
+                1 => 1,
+                2 | 6 => 2,
+                3 | 7 => 3,
+                4 | 5 => 4,
+                8 | 9 | 20 => 5,
+                12 => 6,
+                13 | 14 => 7,
+                16 | 21 | 24..=29 | 32 => 8,
+                10 | 11 | 19 => 9,
+                _ => unreachable!(),
+            };
+            let mut used = 0xdead_beef;
+            // SAFETY: this fixture uses fake managers and in-memory SDK records.
+            let error = unsafe { blugit_test_local_services_fixture(fixture, &mut used) };
+            assert_eq!(error, expected_error, "fixture {fixture}");
+            let expected_mask = match fixture {
+                15 => (1 << 1) | (1 << 3) | (1 << 13),
+                30 => 1 << 13,
+                _ if expected_error == 0 => 0,
+                _ => 0xdead_beef,
+            };
+            assert_eq!(used, expected_mask, "fixture {fixture}");
+        }
+    }
+
+    #[test]
+    fn local_service_getters_require_a_zero_argument_object_returning_signature() {
+        for fixture in 0..=8 {
+            // SAFETY: only Foundation method signatures are constructed.
+            let accepted = unsafe { blugit_test_local_getter_signature(fixture) };
+            assert_eq!(accepted != 0, fixture <= 1, "fixture {fixture}");
+        }
     }
 
     #[test]
@@ -429,7 +473,7 @@ mod tests {
 
     #[test]
     fn publication_cleanup_requires_the_same_class_token_and_channel_at_removal() {
-        for fixture in 0..=11 {
+        for fixture in 0..=13 {
             // Bits report adoption, removal, and the fake record's removal count.
             let expected = match fixture {
                 0 => 0x103,
@@ -596,11 +640,20 @@ mod tests {
     }
 
     fn reserve(directory: &Path, requested: i32) -> io::Result<(OwnedFd, i32)> {
+        reserve_excluding(directory, requested, 0)
+    }
+
+    fn reserve_excluding(
+        directory: &Path,
+        requested: i32,
+        used: u32,
+    ) -> io::Result<(OwnedFd, i32)> {
         let directory = std::ffi::CString::new(directory.as_os_str().as_bytes())?;
         let mut selected = 0;
         // SAFETY: the directory and output pointer remain live during the call.
-        let fd =
-            unsafe { blugit_test_reserve_channel(directory.as_ptr(), requested, &mut selected) };
+        let fd = unsafe {
+            blugit_test_reserve_unused_channel(directory.as_ptr(), requested, used, &mut selected)
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -624,6 +677,51 @@ mod tests {
                 result => return result,
             }
         }
+    }
+
+    #[test]
+    fn channel_selection_avoids_all_advertisements_and_concurrent_reservations()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let used = (1 << 1) | (1 << 3) | (1 << 13) | (1 << 30);
+        let (_first, selected) = reserve_excluding(directory.path(), 0, used)?;
+        assert_eq!(selected, 29);
+        let (_second, selected) = reserve_excluding(directory.path(), 0, used)?;
+        assert_eq!(selected, 28);
+        assert_eq!(
+            reserve_excluding(directory.path(), 30, used)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EADDRINUSE)
+        );
+        assert!(!directory.path().join("channel-30.lock").exists());
+
+        let all = 0x7fff_fffe;
+        assert_eq!(
+            reserve_excluding(directory.path(), 0, all)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EADDRINUSE)
+        );
+        // No unverified hard-coded exclusion for channel 10 or 15.
+        let used = all & !(1 << 10) & !(1 << 15);
+        let (_third, selected) = reserve_excluding(directory.path(), 0, used)?;
+        assert_eq!(selected, 15);
+        let (_fourth, selected) = reserve_excluding(directory.path(), 0, used)?;
+        assert_eq!(selected, 10);
+        assert_eq!(
+            reserve_excluding(directory.path(), 0, used)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EADDRINUSE)
+        );
+        assert_eq!(
+            reserve_excluding(directory.path(), 0, 1 << 31)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EINVAL)
+        );
+        Ok(())
     }
 
     #[test]
@@ -674,7 +772,7 @@ mod tests {
     fn automatic_channel_reservations_are_distinct_and_report_exhaustion() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let mut owners = Vec::new();
-        for expected in 1..=30 {
+        for expected in (1..=30).rev() {
             let (owner, selected) = reserve(directory.path(), 0)
                 .with_context(|| format!("reserve automatic channel {expected} of 30"))?;
             assert_eq!(selected, expected);
@@ -687,9 +785,9 @@ mod tests {
         drop(owners.remove(6));
         assert_eq!(
             reserve_after_close(directory.path(), 0)
-                .context("reacquire automatic channel 7 after closing its owner")?
+                .context("reacquire automatic channel 24 after closing its owner")?
                 .1,
-            7
+            24
         );
         Ok(())
     }

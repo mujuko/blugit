@@ -5,6 +5,7 @@
 #import <IOBluetooth/IOBluetooth.h>
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -42,9 +43,12 @@ static void ReleaseReservation(void) {
     ChannelReservation = -1;
 }
 
-static int ReserveChannel(const char *directory, int requested, int first, int *selected) {
-    if (requested < 0 || requested > 30 || first < 1 || first > 30) { errno = EINVAL; return -1; }
-    for (int channel = requested ? requested : first; channel <= (requested ? requested : 30); ++channel) {
+static const uint32_t AllChannelBits = UINT32_C(0x7ffffffe);
+
+static int ReserveChannel(const char *directory, int requested, uint32_t used, int *selected) {
+    if (requested < 0 || requested > 30 || (used & ~AllChannelBits)) { errno = EINVAL; return -1; }
+    for (int channel = requested ? requested : 30; channel >= (requested ? requested : 1); --channel) {
+        if (used & (UINT32_C(1) << channel)) continue;
         char path[PATH_MAX];
         int length = snprintf(path, sizeof(path), "%s/channel-%d.lock", directory, channel);
         if (length < 0 || (size_t)length >= sizeof(path)) { errno = ENAMETOOLONG; return -1; }
@@ -61,7 +65,11 @@ static int ReserveChannel(const char *directory, int requested, int first, int *
 
 #ifdef BLUGIT_TEST_TRANSPORT
 int blugit_test_reserve_channel(const char *directory, int requested, int *selected) {
-    return ReserveChannel(directory, requested, 1, selected);
+    return ReserveChannel(directory, requested, 0, selected);
+}
+
+int blugit_test_reserve_unused_channel(const char *directory, int requested, uint32_t used, int *selected) {
+    return ReserveChannel(directory, requested, used, selected);
 }
 #endif
 
@@ -533,40 +541,154 @@ static BOOL SDPMatchesUUID(id element, IOBluetoothSDPUUID *expected) {
     return uuid && expected && [uuid isEqualToUUID:expected];
 }
 
-static BOOL ReadRFCOMMChannel(IOBluetoothSDPDataElement *element, BluetoothRFCOMMChannelID *channel) {
+typedef NS_ENUM(int, RFCOMMDescriptorStatus) { RFCOMMAbsent, RFCOMMValid, RFCOMMMalformed, RFCOMMInactive };
+
+static RFCOMMDescriptorStatus ParseRFCOMMChannel(IOBluetoothSDPDataElement *element, BluetoothRFCOMMChannelID *channel) {
     // Do not use getRFCOMMChannelID: the local SDK getter can disagree with
     // its ProtocolDescriptorList. Accept uint8 and SDK-normalized uint16/32.
     @try {
+        if (!element) return RFCOMMAbsent;
         NSArray *protocols = SDPSequence(element);
-        if (!protocols || protocols.count == 0 || protocols.count > 16) return NO;
+        if (!protocols || protocols.count == 0 || protocols.count > 16) return RFCOMMMalformed;
         BOOL found = NO;
+        BOOL inactive = NO;
         BluetoothRFCOMMChannelID selected = 0;
         for (id descriptor in protocols) {
             NSArray *parts = SDPSequence(descriptor);
-            if (!parts || parts.count == 0 || parts.count > 16) return NO;
+            if (!parts || parts.count == 0 || parts.count > 16) return RFCOMMMalformed;
             IOBluetoothSDPUUID *uuid = SDPUUIDValue(parts[0]);
-            if (!uuid) return NO;
+            if (!uuid) return RFCOMMMalformed;
             if (![uuid isEqualToUUID:[IOBluetoothSDPUUID uuid16:0x0003]]) continue;
-            if (found || parts.count != 2) return NO;
-            id numberElement = parts[1];
-            if (![numberElement isKindOfClass:IOBluetoothSDPDataElement.class] || [numberElement getTypeDescriptor] != 1) return NO;
-            uint32_t size = [numberElement getSize];
-            if (size != 1 && size != 2 && size != 4) return NO;
-            id number = [numberElement getNumberValue];
-            if (![number isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)number) == CFBooleanGetTypeID()) return NO;
-            const char *type = [number objCType];
-            if (!type || !strchr("cCsSiIlLqQ", type[0]) || type[1]) return NO;
-            uint64_t value = [number unsignedLongLongValue];
-            if (value < 1 || value > 30) return NO;
-            selected = (BluetoothRFCOMMChannelID)value;
+            if (found || (parts.count != 1 && parts.count != 2)) return RFCOMMMalformed;
             found = YES;
+            // Inventory only: these exact, well-typed forms advertise no
+            // usable number. Adoption/discovery still reject them below.
+            if (parts.count == 1) { inactive = YES; continue; }
+            id numberElement = parts[1];
+            if (![numberElement isKindOfClass:IOBluetoothSDPDataElement.class] || [numberElement getTypeDescriptor] != 1) return RFCOMMMalformed;
+            uint32_t size = [numberElement getSize];
+            if (size != 1 && size != 2 && size != 4) return RFCOMMMalformed;
+            id number = [numberElement getNumberValue];
+            if (![number isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)number) == CFBooleanGetTypeID()) return RFCOMMMalformed;
+            const char *type = [number objCType];
+            if (!type || !strchr("cCsSiIlLqQ", type[0]) || type[1]) return RFCOMMMalformed;
+            uint64_t value = [number unsignedLongLongValue];
+            if (value > 30) return RFCOMMMalformed;
+            selected = (BluetoothRFCOMMChannelID)value;
+            inactive = value == 0;
         }
+        if (inactive) return RFCOMMInactive;
         if (found) *channel = selected;
-        return found;
+        return found ? RFCOMMValid : RFCOMMAbsent;
     } @catch (NSException *exception) {
         (void)exception;
-        return NO;
+        return RFCOMMMalformed;
     }
+}
+
+static BOOL ReadRFCOMMChannel(IOBluetoothSDPDataElement *element, BluetoothRFCOMMChannelID *channel) {
+    return ParseRFCOMMChannel(element, channel) == RFCOMMValid;
+}
+
+typedef NS_ENUM(int, LocalServicesError) {
+    LocalServicesOK, LocalServicesMissingClass, LocalServicesMissingSelector,
+    LocalServicesBadSignature, LocalServicesBadManager, LocalServicesBadCollection,
+    LocalServicesTooMany, LocalServicesBadRecord, LocalServicesBadProtocol,
+    LocalServicesException
+};
+
+static NSString *LocalServicesErrorMessage(LocalServicesError error) {
+    switch (error) {
+        case LocalServicesMissingClass: return @"local service manager is unavailable";
+        case LocalServicesMissingSelector: return @"local service query is unavailable";
+        case LocalServicesBadSignature: return @"local service query has an unsupported signature";
+        case LocalServicesBadManager: return @"local service query returned an invalid manager";
+        case LocalServicesBadCollection: return @"local service query did not return a dictionary";
+        case LocalServicesTooMany: return @"local service query exceeded 1024 records";
+        case LocalServicesBadRecord: return @"local service query returned an invalid or remote record";
+        case LocalServicesBadProtocol: return @"a local service has an invalid RFCOMM descriptor";
+        case LocalServicesException: return @"local service query raised an exception";
+        default: return @"unknown local service query result";
+    }
+}
+
+// Only the two fixed, read-only getters below use this invocation boundary.
+// Check the runtime ABI before sending an undeclared private selector. No
+// private publication, removal, power, or connection operation is permitted.
+static BOOL ValidLocalGetterSignature(NSMethodSignature *signature) {
+    const char *type = signature.methodReturnType;
+    if (signature.numberOfArguments != 2 || signature.methodReturnLength != sizeof(id)
+        || !type || type[0] != '@' || (type[1] && type[1] != '"')
+        || (strcmp([signature getArgumentTypeAtIndex:0], "@") && strcmp([signature getArgumentTypeAtIndex:0], "#"))
+        || strcmp([signature getArgumentTypeAtIndex:1], ":")) return NO;
+    return YES;
+}
+
+static LocalServicesError InvokeLocalServicesGetter(id target, SEL selector, id *result) {
+    Method method = object_isClass(target)
+        ? class_getClassMethod((Class)target, selector)
+        : class_getInstanceMethod(object_getClass(target), selector);
+    if (!method) return LocalServicesMissingSelector;
+    NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
+    if (!ValidLocalGetterSignature(signature)) return LocalServicesBadSignature;
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.selector = selector;
+    [invocation invokeWithTarget:target];
+    __unsafe_unretained id value = nil;
+    [invocation getReturnValue:&value];
+    *result = value;
+    return LocalServicesOK;
+}
+
+static LocalServicesError ChannelsFromLocalServices(id services, uint32_t *used) {
+    if (![services isKindOfClass:NSDictionary.class]) return LocalServicesBadCollection;
+    if ([services count] > 1024) return LocalServicesTooMany;
+    NSDictionary *snapshot = [services copy];
+    if (![snapshot isKindOfClass:NSDictionary.class]) return LocalServicesBadCollection;
+    if (snapshot.count > 1024) return LocalServicesTooMany;
+    id records = snapshot.allValues;
+    if (![records isKindOfClass:NSArray.class] || [records count] != snapshot.count) return LocalServicesBadCollection;
+    uint32_t found = 0;
+    for (id object in records) {
+        if (![object isKindOfClass:IOBluetoothSDPServiceRecord.class] || [object device]) return LocalServicesBadRecord;
+        BluetoothRFCOMMChannelID channel = 0;
+        RFCOMMDescriptorStatus status = ParseRFCOMMChannel([object getAttributeDataElement:0x0004], &channel);
+        if (status == RFCOMMMalformed) return LocalServicesBadProtocol;
+        if (status == RFCOMMValid) found |= UINT32_C(1) << channel;
+    }
+    // On any failure, leave the caller's snapshot untouched. Never mistake
+    // an unreadable or partial inventory for an empty set of advertisements.
+    *used = found;
+    return LocalServicesOK;
+}
+
+static LocalServicesError UsedChannelsFromManager(Class managerClass, uint32_t *used) {
+    @try {
+        if (!managerClass) return LocalServicesMissingClass;
+        id manager = nil;
+        LocalServicesError error = InvokeLocalServicesGetter(managerClass, NSSelectorFromString(@"sharedDeviceManager"), &manager);
+        if (error != LocalServicesOK) return error;
+        if (![manager isKindOfClass:managerClass]) return LocalServicesBadManager;
+        id services = nil;
+        error = InvokeLocalServicesGetter(manager, NSSelectorFromString(@"getLocalServices"), &services);
+        if (error != LocalServicesOK) return error;
+        return ChannelsFromLocalServices(services, used);
+    } @catch (NSException *exception) {
+        (void)exception;
+        return LocalServicesException;
+    }
+}
+
+static uint32_t UsedLocalChannels(void) {
+    // macOS keeps retired advertisements. Read all classes, including our own,
+    // without changing them, rather than trusting publication success as a
+    // reachability check. This optional-at-runtime SPI must fail closed.
+    uint32_t used = 0;
+    LocalServicesError error = UsedChannelsFromManager(NSClassFromString(@"BluetoothDeviceManager"), &used);
+    if (error != LocalServicesOK) {
+        Fail([NSString stringWithFormat:@"Cannot safely choose an unused RFCOMM channel: %@; no service was published", LocalServicesErrorMessage(error)]);
+    }
+    return used;
 }
 
 static BOOL RecordMatchesPublication(IOBluetoothSDPServiceRecord *record, IOBluetoothSDPUUID *token, int expected) {
@@ -723,6 +845,8 @@ uint32_t blugit_test_publication_ownership_fixture(uint32_t fixture) {
             case 9: break; // Adoption succeeds, then ownership changes before cleanup.
             case 10: token = nil; break;
             case 11: break;
+            case 12: definition[@"0004"] = ServiceRecord(0, token)[@"0004"]; break;
+            case 13: definition[@"0004"] = @[@[[IOBluetoothSDPUUID uuid16:0x0100]], @[[IOBluetoothSDPUUID uuid16:3]]]; break;
             default: return UINT32_MAX;
         }
         // The record initializer takes decoded numeric attribute keys and SDK
@@ -743,6 +867,174 @@ uint32_t blugit_test_publication_ownership_fixture(uint32_t fixture) {
 
 int blugit_test_notification_filter(int complete, int own, int existing, int expected, int actual, int incoming) {
     return AcceptNotification(complete != 0, own != 0, existing != 0, expected, actual, incoming != 0);
+}
+#endif
+
+#ifdef BLUGIT_TEST_TRANSPORT
+static IOBluetoothSDPServiceRecord *InMemoryRecord(NSDictionary *definition) {
+    NSMutableDictionary *attributes = [NSMutableDictionary new];
+    for (NSString *key in definition) {
+        unsigned attribute = 0;
+        [[NSScanner scannerWithString:key] scanHexInt:&attribute];
+        attributes[@(attribute)] = [IOBluetoothSDPDataElement withElementValue:definition[key]];
+    }
+    return [[IOBluetoothSDPServiceRecord alloc] initWithServiceDictionary:attributes device:nil];
+}
+
+@interface FakeLocalServiceManager : NSObject
++ (id)sharedDeviceManager;
+- (id)getLocalServices;
+@end
+@implementation FakeLocalServiceManager
++ (id)sharedDeviceManager { return [self new]; }
+- (id)getLocalServices { return @{}; }
+@end
+
+@interface FakeWrongManager : FakeLocalServiceManager @end
+@implementation FakeWrongManager
++ (id)sharedDeviceManager { return [NSObject new]; }
+@end
+@interface FakeNilManager : FakeLocalServiceManager @end
+@implementation FakeNilManager
++ (id)sharedDeviceManager { return nil; }
+@end
+@interface FakeThrowingManager : FakeLocalServiceManager @end
+@implementation FakeThrowingManager
++ (id)sharedDeviceManager { [NSException raise:@"Fixture" format:@"read failed"]; return nil; }
+@end
+@interface FakeThrowingServices : FakeLocalServiceManager @end
+@implementation FakeThrowingServices
+- (id)getLocalServices { [NSException raise:@"Fixture" format:@"read failed"]; return nil; }
+@end
+@interface FakeWrongCollection : FakeLocalServiceManager @end
+@implementation FakeWrongCollection
+- (id)getLocalServices { return @[]; }
+@end
+@interface FakeNilCollection : FakeLocalServiceManager @end
+@implementation FakeNilCollection
+- (id)getLocalServices { return nil; }
+@end
+@interface FakeMissingServices : NSObject
++ (id)sharedDeviceManager;
+@end
+@implementation FakeMissingServices
++ (id)sharedDeviceManager { return [self new]; }
+@end
+@interface FakeWrongSharedSignature : NSObject
++ (uint64_t)sharedDeviceManager;
+@end
+@implementation FakeWrongSharedSignature
++ (uint64_t)sharedDeviceManager { return 0; }
+@end
+@interface FakeWrongServicesSignature : NSObject
++ (id)sharedDeviceManager;
+- (uint64_t)getLocalServices;
+@end
+@implementation FakeWrongServicesSignature
++ (id)sharedDeviceManager { return [self new]; }
+- (uint64_t)getLocalServices { return 0; }
+@end
+
+@interface FakeRemoteRecord : IOBluetoothSDPServiceRecord @end
+@implementation FakeRemoteRecord
+- (IOBluetoothDevice *)device { return (IOBluetoothDevice *)NSNull.null; }
+@end
+@interface FakeThrowingRecord : IOBluetoothSDPServiceRecord @end
+@implementation FakeThrowingRecord
+- (IOBluetoothSDPDataElement *)getAttributeDataElement:(BluetoothSDPServiceAttributeID)attribute {
+    (void)attribute;
+    [NSException raise:@"Fixture" format:@"read failed"]; return nil;
+}
+@end
+
+int blugit_test_local_services_fixture(uint32_t fixture, uint32_t *used) {
+    @autoreleasepool {
+        switch (fixture) {
+            case 0: return UsedChannelsFromManager(FakeLocalServiceManager.class, used);
+            case 1: return UsedChannelsFromManager(Nil, used);
+            case 2: return UsedChannelsFromManager(NSObject.class, used);
+            case 3: return UsedChannelsFromManager(FakeWrongSharedSignature.class, used);
+            case 4: return UsedChannelsFromManager(FakeWrongManager.class, used);
+            case 5: return UsedChannelsFromManager(FakeNilManager.class, used);
+            case 6: return UsedChannelsFromManager(FakeMissingServices.class, used);
+            case 7: return UsedChannelsFromManager(FakeWrongServicesSignature.class, used);
+            case 8: return UsedChannelsFromManager(FakeWrongCollection.class, used);
+            case 9: return UsedChannelsFromManager(FakeNilCollection.class, used);
+            case 10: return UsedChannelsFromManager(FakeThrowingServices.class, used);
+            case 11: return UsedChannelsFromManager(FakeThrowingManager.class, used);
+        }
+        @try {
+            IOBluetoothSDPUUID *token = UUIDValue(@"3199a220-1f9e-4f15-9d97-5f7d6b801330");
+            id records;
+            switch (fixture) {
+                case 12: case 22: {
+                    NSMutableDictionary *many = [NSMutableDictionary new];
+                    id record = InMemoryRecord(@{});
+                    for (unsigned i = 0; i < (fixture == 12 ? 1025 : 1024); ++i) many[@(i)] = record;
+                    records = many; break;
+                }
+                case 13: records = @{@1:NSNull.null}; break;
+                case 14: records = @{@1:[[FakeRemoteRecord alloc] initWithServiceDictionary:@{} device:nil]}; break;
+                case 15: {
+                    NSMutableDictionary *foreign = [ServiceRecord(3, token) mutableCopy];
+                    // Another service class is only an in-memory SDK object,
+                    // never published. Its number must be avoided as well.
+                    foreign[@"0001"] = @[token];
+                    records = @{@1:InMemoryRecord(ServiceRecord(1, token)),
+                                @2:InMemoryRecord(ServiceRecord(13, token)),
+                                @3:InMemoryRecord(foreign),
+                                @4:InMemoryRecord(@{@"0001":@[token]}),
+                                @5:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:0x0100]]]}),
+                                @6:InMemoryRecord(ServiceRecord(13, token))};
+                    break;
+                }
+                case 16: records = @{@1:InMemoryRecord(@{@"0004":@3})}; break;
+                // Exact structures read back from our earlier zero/omit
+                // probes: no usable port, not an unknown malformed record.
+                case 17: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid32:0x0100]], @[[IOBluetoothSDPUUID uuid32:3]]]})}; break;
+                case 18: records = @{@1:InMemoryRecord(ServiceRecord(0, token))}; break;
+                case 19: records = @{@1:[[FakeThrowingRecord alloc] initWithServiceDictionary:@{} device:nil]}; break;
+                case 20: records = @[@1]; break;
+                case 21: records = @{@1:InMemoryRecord(ServiceRecord(3, token)), @2:InMemoryRecord(ServiceRecord(31, token))}; break;
+                case 23: records = @{@1:InMemoryRecord(@{})}; break;
+                case 24: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:3], @{@"DataElementType":@2, @"DataElementSize":@4, @"DataElementValue":@0}]]})}; break;
+                case 25: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:3]], @[[IOBluetoothSDPUUID uuid16:3], SDPUnsigned32(1)]]})}; break;
+                case 26: records = @{@1:InMemoryRecord(ServiceRecord(-1, token))}; break;
+                case 27: records = @{@1:InMemoryRecord(ServiceRecord(31, token))}; break;
+                case 28: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:3], @{@"DataElementType":@1, @"DataElementSize":@8, @"DataElementValue":@0}]]})}; break;
+                case 29: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:3], @"0"]]})}; break;
+                case 30: records = @{@1:InMemoryRecord(ServiceRecord(0, token)),
+                                    @2:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid32:0x0100]], @[[IOBluetoothSDPUUID uuid32:3]]]}),
+                                    @3:InMemoryRecord(ServiceRecord(13, token))}; break;
+                case 31: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid32:0x0100]], @[[IOBluetoothSDPUUID uuid32:3], SDPUnsigned32(0)]]})}; break;
+                case 32: records = @{@1:InMemoryRecord(@{@"0004":@[@[[IOBluetoothSDPUUID uuid16:3], SDPUnsigned32(0)], @[[IOBluetoothSDPUUID uuid16:3], SDPUnsigned32(0)]]})}; break;
+                default: return -1;
+            }
+            return ChannelsFromLocalServices(records, used);
+        } @catch (NSException *exception) {
+            (void)exception;
+            return LocalServicesException;
+        }
+    }
+}
+
+int blugit_test_local_getter_signature(uint32_t fixture) {
+    @autoreleasepool {
+        const char *encoding;
+        switch (fixture) {
+            case 0: encoding = "@16@0:8"; break;
+            case 1: encoding = "@16#0:8"; break;
+            case 2: encoding = "Q16@0:8"; break;
+            case 3: encoding = "v16@0:8"; break;
+            case 4: encoding = "@20@0:8i16"; break;
+            case 5: encoding = "@16^v0:8"; break;
+            case 6: encoding = "@16@0^v8"; break;
+            case 7: encoding = "@?16@0:8"; break;
+            case 8: return ValidLocalGetterSignature(nil);
+            default: return -1;
+        }
+        return ValidLocalGetterSignature([NSMethodSignature signatureWithObjCTypes:encoding]);
+    }
 }
 #endif
 
@@ -830,6 +1122,10 @@ int blugit_macos_main(int argc, const char **argv) {
             __attribute__((objc_precise_lifetime)) Listener *listener = [Listener new];
             listener.path = @(argv[1]);
             listener.existingChannels = [NSMutableSet new];
+            uint32_t used = UsedLocalChannels();
+            if (requested && (used & (UINT32_C(1) << requested))) {
+                Fail(@"Requested RFCOMM channel already has a local advertisement, including a retired service; omit --channel to choose an unused channel");
+            }
             // The reservation namespace is independent of BLUGIT_HOME and the
             // helper binary cache. Never unlink its files: an existing inode
             // may still be locked by another process.
@@ -839,12 +1135,21 @@ int blugit_macos_main(int argc, const char **argv) {
                 Fail([NSString stringWithFormat:@"Cannot create RFCOMM reservation directory: %@", directoryError.localizedDescription]);
             }
             BluetoothRFCOMMChannelID reserved = 0;
-            for (int first = 1; first <= 30;) {
+            for (;;) {
                 int candidate = 0;
-                int reservation = ReserveChannel(directory.fileSystemRepresentation, requested, first, &candidate);
+                int reservation = ReserveChannel(directory.fileSystemRepresentation, requested, used, &candidate);
                 if (reservation < 0) {
                     if (errno == EADDRINUSE) Fail(requested ? @"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation" : @"No free RFCOMM channel is available");
                     Fail([NSString stringWithFormat:@"Cannot reserve RFCOMM channel: %s", strerror(errno)]);
+                }
+                // A process may have published and exited since the first
+                // inventory. Recheck while holding this number's lock, so no
+                // cooperating blugit process can publish it in the gap.
+                used |= UsedLocalChannels();
+                if (used & (UINT32_C(1) << candidate)) {
+                    close(reservation);
+                    if (requested) Fail(@"Requested RFCOMM channel now has a local advertisement; omit --channel to choose an unused channel");
+                    continue;
                 }
                 IOBluetoothSDPUUID *token = UUIDValue(NSUUID.UUID.UUIDString);
                 IOBluetoothSDPServiceRecord *record = [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:ServiceRecord(candidate, token)];
@@ -860,8 +1165,7 @@ int blugit_macos_main(int argc, const char **argv) {
                 // remove any return value that fails our complete identity.
                 fprintf(stderr, "blugit Bluetooth: publication identity mismatch channel=%d; returned record left untouched\n", candidate);
                 close(reservation);
-                if (requested) Fail(@"Requested RFCOMM channel is unavailable; omit --channel for automatic allocation");
-                first = candidate + 1;
+                Fail(@"Cannot verify the new RFCOMM publication; returned record left untouched");
             }
             if (!PublishedRecord) Fail(@"Cannot allocate a free RFCOMM channel");
             listener.expected = reserved;
