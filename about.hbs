@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blugit third-party licenses</title>
+<style>
+body { max-width: 70rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f5; padding: 1rem; }
+</style>
+<h1>blugit third-party licenses</h1>
+<p>Generated from Cargo.lock with cargo-about. Components keep their original licenses.
+This inventory covers all supported targets and includes build and development dependencies.</p>
+<p>Unmodified crate sources are available using the versioned source links below.
+For the MPL-2.0 component option-ext, those links provide its corresponding Source Code Form.</p>
+{{#each licenses}}
+<section>
+<h2>{{name}} ({{id}})</h2>
+<ul>
+{{#each used_by}}
+<li>{{crate.name}} {{crate.version}} —
+{{#if crate.source}}
+<a href="https://crates.io/api/v1/crates/{{crate.name}}/{{crate.version}}/download">source archive</a>
+{{/if}}
+{{#if crate.repository}} <a href="{{crate.repository}}">upstream</a>{{/if}}</li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+</section>
+{{/each}}
+</html>

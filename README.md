@@ -186,6 +186,17 @@ PCごとに `blugit join` で登録してください。同じ登録名にすれ
 - [チャネル自動解決](docs/channel-resolution.md)：ホスト再起動後の再接続のしくみ
 - [検証記録](docs/validation.md)：自動テストと実機での確認範囲
 - [リリース手順](docs/releasing.md)：配布設定と公開手順
+- [依存関係とセキュリティ検査](docs/security-maintenance.md)：検査・更新・ライセンス一覧の再生成
 
 自動テストは `cargo test --locked --features test-transport` で実行します。
 `test-transport` はBluetoothをIP接続で代替するテスト専用機能のため、通常のビルドでは有効にしないでください。
+
+## セキュリティ
+
+機密情報・高い保証を必要とする業務用途は対象外です。
+脆弱性の報告方法と保護の範囲は[セキュリティ方針](SECURITY.md)を参照してください。
+
+## ライセンス
+
+[Apache License 2.0](LICENSE)で公開しています。
+依存ライブラリのライセンス・著作権表示は[第三者ライセンス一覧](THIRD_PARTY_LICENSES.html)に記載しています。

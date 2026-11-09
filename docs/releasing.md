@@ -30,6 +30,10 @@ Pull Requestでは配布計画と生成ファイルの整合性を検証し、�
 
 ## GitHub Releasesへ公開する
 
+初回のリポジトリ公開時は、[セキュリティ検査と公開時の設定](security-maintenance.md)も実施してください。
+依存関係やバージョンを変更したら、ライセンス一覧を再生成してコミットし、`Security` ワークフローの成功も確認します。
+配布アーカイブには `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.html` を含めます。
+
 1. `Cargo.toml` のバージョンを決め、変更した場合は `cargo check --locked` で確認します。ロックファイルの更新が必要なら `cargo check` で更新し、`Cargo.lock` もコミットしてください。
 2. 通常のCIが通ることと、`dist generate --check` / `dist plan` の成功を確認し、リリース対象のコミットをGitHubへpushします。
 3. そのコミットに `v` + バージョンのタグを付けてpushします。現在の `1.0.0` を初めて公開する例は以下です。

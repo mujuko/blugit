@@ -22,6 +22,7 @@ all-features = false
 features = []
 # Whether to install an updater program
 install-updater = false
+include = ["NOTICE", "THIRD_PARTY_LICENSES.html"]
 
 [dist.dependencies.apt]
 pkg-config = "*"

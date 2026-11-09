@@ -1,0 +1,23 @@
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT-0",
+    "Unicode-3.0",
+]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+]
+workarounds = ["ring"]
+
+[option-ext]
+accepted = ["MPL-2.0"]
+
+[ring]
+accepted = ["OpenSSL"]

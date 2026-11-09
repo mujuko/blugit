@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 description = "Authenticated offline Git sharing over Bluetooth"
 repository = "https://github.com/mujuko/blugit"
+license = "Apache-2.0"
 default-run = "blugit"
 
 [features]
