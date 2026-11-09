@@ -79,19 +79,19 @@
 | `--channel` を省略 | チャネルを自動選択する。確保できなければエラー |
 | `--channel 番号` を指定 | その番号を確保する。使用中ならエラー |
 
-OSから実際の割当番号を読み取り、明示した番号との一致と1〜30の範囲を確認してから接続コードを表示する。
+確保した番号が1〜30の範囲内にあり、明示指定した場合はその番号と一致することを確認してから接続コードを表示する。
 
 ### OSごとのチャネル確保
 
 | OS | 自動選択の方法 |
 |---|---|
 | Windows | `BT_PORT_ANY` でbindし、`getsockname` で割当番号を取得する。[API仕様](https://learn.microsoft.com/en-us/windows/win32/bluetooth/bluetooth-and-bind) |
-| macOS | アダプター別のプロセス間ロックで番号を予約し、公開したProtocolDescriptorListの番号と所有tokenを照合して接続通知を受け付ける。[API仕様](https://developer.apple.com/documentation/iobluetooth/iobluetoothsdpservicerecord/publishedservicerecord(with:)) |
+| macOS | ローカル広告に残る番号を除外し、30番から降順で候補を選ぶ。候補のプロセス間ロックを取得して広告一覧を再照会し、未使用なら公開する。公開結果の番号と所有tokenも照合する。[公開API仕様](https://developer.apple.com/documentation/iobluetooth/iobluetoothsdpservicerecord/publishedservicerecord(with:)) |
+| Linux | RFCOMMソケットのチャネル0で動的割当を要求し、`local_addr` で割当番号を取得する。[API仕様](https://docs.rs/bluer/0.17.4/bluer/rfcomm/struct.Listener.html) |
 
 macOSではSDKの番号取得APIと広告値の不一致を実機で確認したため、属性の構造・型・値域を直接検証する。
 公開ごとのランダムなUUIDを使い、blugit単一クラス・UUID・番号が一致したレコードだけを採用・削除する。このUUIDはローカルの誤操作防止用であり、ゲストの認証やSSHホスト鍵の照合を代替しない。
-他サービスのレコードを割当のために削除しない。自動1番への接続失敗は未解決で、確認範囲は[検証記録](validation.md)に記載する。
-| Linux | RFCOMMソケットのチャネル0で動的割当を要求し、`local_addr` で割当番号を取得する。[API仕様](https://docs.rs/bluer/0.17.4/bluer/rfcomm/struct.Listener.html) |
+広告一覧の取得には非公開の読み取りAPIを使い、取得できなければ公開前にエラーにする。他サービスのレコードを割当のために削除しない。既存広告を避ける自動選択と、再起動後の再接続を実機確認した。依存するAPIと制約は[チャネル自動解決](channel-resolution.md#ホスト側の番号確保)、確認範囲は[検証記録](validation.md)に記載する。
 
 ### 再起動後の接続先の更新
 
