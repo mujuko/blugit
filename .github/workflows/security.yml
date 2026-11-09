@@ -27,7 +27,8 @@ jobs:
       - name: Check bundled third-party license notices
         run: |
           cargo about generate --locked --fail -o "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html" about.hbs
-          diff -u THIRD_PARTY_LICENSES.html "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html"
+          # License files from upstream crates can contain CRLF on any host.
+          diff --strip-trailing-cr -u THIRD_PARTY_LICENSES.html "$RUNNER_TEMP/THIRD_PARTY_LICENSES.html"
 
   secrets:
     runs-on: ubuntu-latest
