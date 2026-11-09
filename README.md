@@ -18,8 +18,49 @@ Linuxと残る実機項目の確認範囲は、[検証記録と実機確認手�
 
 ## インストール
 
-両方のPCにGit、Rust stable、Bluetooth Classic（RFCOMM）対応アダプターが必要です。
-BLE専用アダプターは使えません。OSごとのビルド環境も用意してください。
+両方のPCにGitとBluetooth Classic（RFCOMM）対応アダプターが必要です。
+BLE専用アダプターは使えません。配布版のインストールにRustやC++のビルド環境は不要です。
+
+### 配布版をインストール
+
+以下のコマンドは、初回の[GitHub Release](https://github.com/mujuko/blugit/releases)公開後に利用できます。
+インターネットに接続できるうちに、両PCで実行してください。
+
+Windows（x64）のPowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/mujuko/blugit/releases/latest/download/blugit-installer.ps1 | iex"
+```
+
+macOS（Intel / Apple Silicon）・Linux（x64）:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/mujuko/blugit/releases/latest/download/blugit-installer.sh | sh
+```
+
+Linuxの配布版にはglibc 2.35以降が必要です（Ubuntu 22.04以降など）。
+BlueZとD-Busの実行時ライブラリも必要です。Debian / Ubuntuでは、先に以下を実行してください。
+
+```sh
+sudo apt-get update
+sudo apt-get install -y bluez libdbus-1-3
+```
+
+`blugit` と `git-remote-blugit` の両方が、通常はホームディレクトリの `.cargo/bin` にインストールされます。
+インストーラーはPATHも設定します。ターミナルを開き直し、両方のコマンドで同じバージョンが表示されることを確認してください。
+
+```sh
+blugit --version
+git-remote-blugit --version
+```
+
+`blugit` は共有・端末登録用、`git-remote-blugit` はGitが自動で呼び出す接続用プログラムです。
+更新するときも同じインストールコマンドを実行してください。
+インストール後のGit転送にインターネット接続は不要です。
+
+### ソースからビルド
+
+Rust stableと、OSごとのビルド環境を用意してください。
 
 | OS | 必要な環境 |
 |---|---|
@@ -27,7 +68,7 @@ BLE専用アダプターは使えません。OSごとのビルド環境も用意
 | macOS | Xcode Command Line Tools |
 | Linux | BlueZ、D-Bus、`pkg-config`、`libdbus-1-dev`（Debian / Ubuntuの場合） |
 
-インターネットに接続できるうちに、両PCでこのソースのディレクトリから実行してください。
+このソースのディレクトリから実行してください。
 
 ```sh
 cargo install --path . --locked --force
@@ -35,10 +76,8 @@ blugit --version
 git-remote-blugit --version
 ```
 
-`blugit` は共有・端末登録用、`git-remote-blugit` はGitが自動で呼び出す接続用プログラムです。
-両方が `1.0.0` と表示されればインストール完了。コマンドが見つからない場合は、
+両方が `1.0.0` と表示されればインストール完了です。コマンドが見つからない場合は、
 Cargoのインストール先（通常はホームディレクトリの `.cargo/bin`）をPATHに追加してください。
-インストール後のGit転送にインターネット接続は不要です。
 
 ## リポジトリを共有する
 
@@ -157,3 +196,4 @@ SSH切替前の未リリース版との互換性はありません。両端末�
 モジュール構成とテストの対応は[設計](docs/architecture.md)、確認範囲と実機手順は[検証記録](docs/validation.md)を参照してください。
 自動テストは `cargo test --locked --features test-transport` で実行できます。
 `test-transport` はIP接続で無線を代替するテスト専用機能のため、通常利用のビルドでは有効にしないでください。
+配布設定の変更方法と公開手順は[リリース手順](docs/releasing.md)を参照してください。

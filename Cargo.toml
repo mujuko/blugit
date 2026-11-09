@@ -3,6 +3,7 @@ name = "blugit"
 version = "1.0.0"
 edition = "2024"
 description = "Authenticated offline Git sharing over Bluetooth"
+repository = "https://github.com/mujuko/blugit"
 default-run = "blugit"
 
 [features]
@@ -59,3 +60,8 @@ path = "src/main.rs"
 [[bin]]
 name = "git-remote-blugit"
 path = "src/bin/git-remote-blugit.rs"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
