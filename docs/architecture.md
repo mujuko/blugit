@@ -382,4 +382,4 @@ macOSではネイティブのBluetooth処理を専用の小さな実行ファイ
 - [SPAKE2の仕様・制約](https://docs.rs/spake2/0.4.0/spake2/)
 - [Snow / Noise](https://docs.rs/snow/0.10.0/snow/)、[Noise specification](https://noiseprotocol.org/noise.html)
 - [fs2のプロセス間ロック](https://docs.rs/fs2/0.4.3/fs2/trait.FileExt.html)
-- [x25519-dalekの静的鍵](https://docs.rs/x25519-dalek/2.0.1/x25519_dalek/struct.StaticSecret.html)
+- [x25519-dalekの静的鍵](https://docs.rs/x25519-dalek/3.0.0/x25519_dalek/struct.StaticSecret.html)

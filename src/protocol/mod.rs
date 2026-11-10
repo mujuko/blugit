@@ -18,7 +18,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 pub use code::Code;
 use messages::{MAGIC, Operation, Reply, Request, Response};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -64,7 +64,7 @@ impl Server {
             bail!("wrong repository requested");
         }
         let mut nonce = [0; 16];
-        OsRng.fill_bytes(&mut nonce);
+        UnwrapErr(SysRng).fill_bytes(&mut nonce);
         let reply = Reply {
             share: self.share.id(),
             host: self.device.peer().clone(),

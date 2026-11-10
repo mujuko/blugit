@@ -1,6 +1,6 @@
 //! Domain values. No filesystem, CLI, radio or process dependencies.
 use anyhow::{Result, ensure};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
@@ -12,7 +12,7 @@ impl ShareId {
     pub fn generate() -> Self {
         let mut bytes = [0; 16];
         loop {
-            OsRng.fill_bytes(&mut bytes);
+            UnwrapErr(SysRng).fill_bytes(&mut bytes);
             if bytes != [0; 16] {
                 break;
             }

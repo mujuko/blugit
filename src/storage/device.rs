@@ -1,7 +1,7 @@
 use super::atomic;
 use crate::model::Peer;
 use anyhow::{Context, Result, ensure};
-use rand::{RngCore, rngs::OsRng};
+use rand::{Rng, rand_core::UnwrapErr, rngs::SysRng};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -45,11 +45,11 @@ impl Device {
             Some(record) => record,
             None => {
                 let mut secret = [0; 32];
-                OsRng.fill_bytes(&mut secret);
+                UnwrapErr(SysRng).fill_bytes(&mut secret);
                 let key = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(secret))
                     .to_bytes();
                 let mut ssh_secret = [0; 32];
-                OsRng.fill_bytes(&mut ssh_secret);
+                UnwrapErr(SysRng).fill_bytes(&mut ssh_secret);
                 Record {
                     schema: 2,
                     peer: Peer {
@@ -119,6 +119,41 @@ fn ssh_public(seed: &[u8; 32]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_identity_keeps_its_keys_and_serialized_record() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Public X25519 test vector from RFC 7748 section 6.1.
+        let secret: [u8; 32] =
+            hex::decode("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")?
+                .try_into()
+                .unwrap();
+        let key: [u8; 32] =
+            hex::decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")?
+                .try_into()
+                .unwrap();
+        let ssh_secret = [23; 32];
+        let ssh_key = ssh_public(&ssh_secret);
+        atomic::write(
+            &dir.path().join("identity.json"),
+            &Record {
+                schema: 2,
+                peer: Peer {
+                    name: "legacy-device".into(),
+                    key,
+                    ssh_key,
+                },
+                secret,
+                ssh_secret,
+            },
+        )?;
+        let before = std::fs::read(dir.path().join("identity.json"))?;
+        let device = Device::open(dir.path().into(), None)?;
+        assert_eq!(device.peer().key, key);
+        assert_eq!(device.peer().ssh_key, ssh_key);
+        assert_eq!(device.secret(), &secret);
+        assert_eq!(std::fs::read(dir.path().join("identity.json"))?, before);
+        Ok(())
+    }
     #[test]
     fn identity_survives_rename_and_restart() -> Result<()> {
         let dir = tempfile::tempdir()?;

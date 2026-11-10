@@ -1,12 +1,15 @@
 use anyhow::{Result, ensure};
-use rand::{Rng, rngs::OsRng};
+use rand::{RngExt, rand_core::UnwrapErr, rngs::SysRng};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Code(String);
 impl Code {
     pub(super) fn generate() -> Self {
-        Self(format!("{:06}", OsRng.gen_range(0..1_000_000u32)))
+        Self(format!(
+            "{:06}",
+            UnwrapErr(SysRng).random_range(0..1_000_000u32)
+        ))
     }
     pub fn parse(value: &str) -> Result<Self> {
         ensure!(
