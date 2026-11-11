@@ -286,6 +286,8 @@ dependencies = [
 name = "blugit"
 version = "1.0.1"
 dependencies = [
+ "anstream",
+ "anstyle",
  "anyhow",
  "async-trait",
  "bluer",

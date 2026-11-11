@@ -2,15 +2,27 @@ use crate::{
     client,
     connection_code::ConnectionCode,
     endpoint::{Channel, Contact},
-    git, platform,
+    git,
+    model::Peer,
+    platform,
     protocol::{Code, EnrollmentNotice, Notify},
     server::{self, Host, Shutdown},
     storage::{Alias, Device, FileLock, ShareStore},
 };
+use anstyle::{AnsiColor, Effects, Style};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::{io::Write, path::PathBuf, sync::Arc};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::watch;
+
+const BOLD: Style = Style::new().effects(Effects::BOLD);
+const HIGHLIGHT: Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
+const ATTENTION: Style = AnsiColor::Yellow.on_default();
+const SUCCESS: Style = AnsiColor::Green.on_default();
 
 #[derive(Parser)]
 #[command(
@@ -58,15 +70,57 @@ enum Command {
 
 fn notice() -> Notify {
     Arc::new(|n: EnrollmentNotice| {
-        eprintln!(
-            "JOIN share={} device={:?} id={} CODE={} (one attempt; expires in 180s)",
-            n.share,
+        anstream::eprintln!(
+            "\n{ATTENTION}!{ATTENTION:#} {BOLD}Registration requested{BOLD:#} from {:?} [{}]\
+             \n  Six-digit code: {HIGHLIGHT}{}{HIGHLIGHT:#}\
+             \n  One attempt. Expires in 180 seconds.",
             n.peer.name,
             n.peer.short_id(),
             n.code.as_str()
         )
     })
 }
+
+fn suggested_alias(repository: &Path) -> Alias {
+    let name = repository
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    let stem = match name.rsplit_once('.') {
+        Some((stem, extension)) if extension.eq_ignore_ascii_case("git") => stem,
+        _ => &name,
+    };
+    let alias = stem
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let alias = alias.trim_start_matches(['-', '_']);
+    alias[..alias.len().min(32)]
+        .parse()
+        .unwrap_or_else(|_| "repo".parse().expect("valid fallback alias"))
+}
+
+fn print_host(repository: &Path, peer: &Peer, code: ConnectionCode, automatic: bool) {
+    let name = suggested_alias(repository);
+    let channel = code.0.channel.get();
+    let allocation = if automatic { "automatic" } else { "specified" };
+    anstream::println!(
+        "{BOLD}Sharing{BOLD:#} {}\
+         \n  Device:          {} [{}]\
+         \n  Channel:         {channel} ({allocation})\
+         \n  Connection code: {HIGHLIGHT}{code}{HIGHLIGHT:#}\
+         \n\nOn the guest, run (you can change the local name):\
+         \n  {BOLD}blugit join {code} {name}{BOLD:#}",
+        repository.display(),
+        peer.name,
+        peer.short_id(),
+    );
+    anstream::eprintln!(
+        "\nPress {BOLD}Ctrl+C{BOLD:#} to stop sharing. Active transfers may finish."
+    );
+}
+
 fn root(path: Option<PathBuf>) -> Result<PathBuf> {
     match path {
         Some(p) => Ok(p),
@@ -107,25 +161,7 @@ pub async fn run() -> Result<u8> {
                 address: listener.address,
                 channel: Channel::try_from(listener.channel)?,
             });
-            println!(
-                "Sharing {}\nDevice: {} [{}]",
-                repository.display(),
-                device.peer().name,
-                device.peer().short_id()
-            );
-            println!(
-                "Channel: {}{}",
-                listener.channel,
-                if channel.is_none() {
-                    " (automatic)"
-                } else {
-                    " (specified)"
-                }
-            );
-            println!(
-                "Connection code: {code}\nJoin (choose a local name): blugit join {code} demo"
-            );
-            eprintln!("Press Ctrl+C to stop sharing; transfers already running may finish.");
+            print_host(&repository, device.peer(), code, channel.is_none());
             let result =
                 server::run(listener, Arc::new(Host::new(device, share, notice())), rx).await;
             signals.abort();
@@ -187,11 +223,12 @@ async fn execute(command: Command, root: PathBuf) -> Result<()> {
         Command::Join { code, name } => {
             let device = Device::open(root, None)?;
             let host = client::enroll(&device, code.0, &name, |host| async move {
-                eprintln!(
-                    "Registration requested from {:?}. Ask the host operator for the code.",
+                anstream::eprintln!(
+                    "{BOLD}Registration requested{BOLD:#} from {:?}.\n\n\
+                     Ask the host operator for the code.",
                     host.name
                 );
-                eprint!("Six-digit code: ");
+                anstream::eprint!("{BOLD}Six-digit code:{BOLD:#} ");
                 std::io::stderr().flush()?;
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
@@ -204,8 +241,10 @@ async fn execute(command: Command, root: PathBuf) -> Result<()> {
                 Code::parse(&rx.await.context("code reader stopped")??)
             })
             .await?;
-            println!(
-                "Registered with {} [{}] as {name}.\nClone: git clone {}",
+            anstream::println!(
+                "\n{SUCCESS}✓{SUCCESS:#} Registered with {} [{}] as {BOLD}{name}{BOLD:#}.\
+                 \n\nTo clone the repository:\
+                 \n  {BOLD}git clone {}{BOLD:#}",
                 host.name,
                 host.short_id(),
                 name.url()
@@ -241,6 +280,26 @@ async fn execute(command: Command, root: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggests_a_valid_join_name_from_the_repository() {
+        for (repository, expected) in [
+            ("../git-test/hoge.git/", "hoge"),
+            ("test.git", "test"),
+            ("My Project.GIT", "my-project"),
+            ("Repo_v2", "repo_v2"),
+            ("__Test.Tools.git", "test-tools"),
+            ("日本語.git", "repo"),
+            (".git", "repo"),
+            (
+                "abcdefghijklmnopqrstuvwxyz0123456789.git",
+                "abcdefghijklmnopqrstuvwxyz012345",
+            ),
+        ] {
+            assert_eq!(suggested_alias(Path::new(repository)).to_string(), expected);
+        }
+    }
+
     #[test]
     fn cli_exposes_only_v1_operations() {
         let automatic = Cli::try_parse_from(["blugit", "host", "demo.git"]).unwrap();

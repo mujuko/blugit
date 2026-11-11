@@ -25,6 +25,7 @@ impl RunningHost {
             .arg(state)
             .arg("__test-host")
             .arg(repository)
+            .env("NO_COLOR", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -38,8 +39,8 @@ impl RunningHost {
         let (code_tx, codes) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Some((_, tail)) = line.split_once("CODE=") {
-                    let _ = code_tx.send(tail.split_whitespace().next().unwrap().to_owned());
+                if let Some(code) = line.trim().strip_prefix("Six-digit code: ") {
+                    let _ = code_tx.send(code.to_owned());
                 } else {
                     eprintln!("{line}");
                 }
@@ -150,6 +151,7 @@ impl Harness {
             .arg(&host.code)
             .arg(name)
             .env("BLUGIT_TEST_ADDR", &host.address)
+            .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
