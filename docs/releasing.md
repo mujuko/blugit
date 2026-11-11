@@ -35,7 +35,7 @@ Pull Requestでは配布計画と生成ファイルの整合性を検証し、�
 配布アーカイブには `LICENSE`、`NOTICE`、`THIRD_PARTY_LICENSES.html` を含めます。
 
 1. `Cargo.toml` のバージョンを決め、変更した場合は `cargo check --locked` で確認します。ロックファイルの更新が必要なら `cargo check` で更新し、`Cargo.lock` もコミットしてください。
-2. 通常のCIが通ることと、`dist generate --check` / `dist plan` の成功を確認し、リリース対象のコミットをGitHubへpushします。
+2. `dist generate --check` と `dist plan` の成功を確認し、リリース対象のコミットをGitHubへpushします。対象の `Rust` ワークフローの成功を確認してください。`main` へのpushやPRで起動していなければ、対象ブランチで手動実行します。
 3. Actionsの `Release check` を対象コミットのブランチで手動実行し、全対象の配布物とインストーラーの生成が成功することを確認します。このワークフローはGitHub Releaseを作成しません。
 4. 初回はリポジトリを公開し、Private vulnerability reportingの有効化と公開設定の確認まで済ませます。
 5. 最後に、そのコミットへ `v` + バージョンのタグを付けてpushします。`1.0.0` の例は以下です。
