@@ -22,32 +22,28 @@ export default defineConfig({
 
   themeConfig: {
     nav: [
-      { text: 'Git講座（スライド）', link: '/git/', activeMatch: '/git/' },
-      { text: 'blugitガイド', link: '/guide/why', activeMatch: '/guide/' },
-      { text: 'コマンド一覧', link: '/guide/commands' },
+      { text: 'Git講座', link: '/git/', activeMatch: '^/git/' },
+      { text: 'blugit講座', link: '/guide/', activeMatch: '^/guide/$' },
+      { text: '資料', link: '/guide/install', activeMatch: '^/guide/.+' },
     ],
 
     sidebar: {
       '/guide/': [
         {
-          text: '第2部 blugitガイド',
+          text: '講座（スライド）',
           items: [
-            { text: '1. なぜblugit？', link: '/guide/why' },
-            { text: '2. blugitのしくみ（ざっくり）', link: '/guide/overview' },
-            { text: '3. インストール', link: '/guide/install' },
-            { text: '4. はじめての共有', link: '/guide/first-share' },
-            { text: '5. 毎日の使い方', link: '/guide/daily' },
-            { text: '6. 端末とアクセスの管理', link: '/guide/devices' },
-            { text: '7. 困ったとき', link: '/guide/troubleshooting' },
-            { text: '8. コマンドリファレンス', link: '/guide/commands' },
-            { text: '9. しくみ（読み物）', link: '/guide/internals' },
+            { text: '第1部 Git講座', link: '/git/' },
+            { text: '第2部 blugit講座', link: '/guide/' },
           ],
         },
         {
-          text: '付録',
+          text: '資料',
           items: [
+            { text: 'インストール', link: '/guide/install' },
             { text: 'ターミナルの基本', link: '/guide/terminal' },
-            { text: 'Git講座（スライド）', link: '/git/' },
+            { text: 'コマンドリファレンス', link: '/guide/commands' },
+            { text: '困ったとき', link: '/guide/troubleshooting' },
+            { text: 'しくみ（読み物）', link: '/guide/internals' },
           ],
         },
       ],

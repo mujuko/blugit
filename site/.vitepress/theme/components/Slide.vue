@@ -245,6 +245,118 @@ function onKey(event: KeyboardEvent) {
   font-size: 22px;
 }
 
+/* blugit guide parts at slide size */
+.deck--slides .slide .ac {
+  margin: 12px 0;
+}
+
+.deck--slides .slide .ac__who {
+  font-size: 18px;
+}
+
+.deck--slides .slide .ac__code {
+  font-size: 30px;
+}
+
+.deck--slides .slide .ac__copy {
+  display: none;
+}
+
+.deck--slides .slide .ac__badge,
+.deck--slides .slide .ts__badge,
+.deck--slides .slide .cc__badge {
+  width: 26px;
+  height: 26px;
+  font-size: 15px;
+}
+
+.deck--slides .slide .ac__notes li,
+.deck--slides .slide .ts__notes li,
+.deck--slides .slide .cc__notes li {
+  font-size: 23px;
+  line-height: 1.5;
+}
+
+.deck--slides .slide .ts {
+  margin: 12px 0;
+}
+
+.deck--slides .slide .ts__title {
+  font-size: 16px;
+}
+
+.deck--slides .slide .ts__lines {
+  font-size: 19px;
+}
+
+.deck--slides .slide .ts__gutter {
+  width: 26px;
+}
+
+/* A single terminal on a slide: notes to the right of the window. */
+.deck--slides .slide__body > .ts {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  column-gap: 28px;
+  align-items: start;
+}
+
+.deck--slides .slide__body > .ts > .ts__bar {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.deck--slides .slide__body > .ts > .ts__body {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.deck--slides .slide__body > .ts > .ts__notes {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  margin: 0;
+}
+
+/* Two terminals side by side: keep them compact. */
+.deck--slides .slide .screens .ts__lines {
+  font-size: 16px;
+}
+
+.deck--slides .slide .screens .ts__notes li {
+  font-size: 20px;
+}
+
+.deck--slides .slide .handoff {
+  font-size: 24px;
+}
+
+.deck--slides .slide .cc__code {
+  gap: 10px;
+  padding: 28px 16px 48px;
+}
+
+.deck--slides .slide .cc__tile {
+  width: 46px;
+  height: 64px;
+  font-size: 38px;
+}
+
+.deck--slides .slide .cc__dash {
+  font-size: 32px;
+}
+
+.deck--slides .slide .ws svg {
+  max-width: 500px;
+}
+
+.deck--slides .slide .custom-block {
+  font-size: 22px;
+}
+
+.deck--slides .slide .custom-block .custom-block-title {
+  font-size: 22px;
+}
+
 /* Two columns */
 .slide .cols {
   display: grid;
@@ -261,6 +373,14 @@ function onKey(event: KeyboardEvent) {
 .deck--slides .slide .cols--figure {
   grid-template-columns: 1fr 500px;
   align-items: center;
+}
+
+.deck--slides .slide .cols--figure-wide {
+  grid-template-columns: 1fr 600px;
+}
+
+.deck--slides .slide .cols--figure-wide .ws svg {
+  max-width: 600px;
 }
 
 .deck--slides .slide .ht svg {

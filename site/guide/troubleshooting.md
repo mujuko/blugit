@@ -13,7 +13,7 @@
 - 両方のPCで Bluetooth がオンになっているか確かめてください。
 - 2台のPCを近づけてみてください。
 - macOS では、初回や更新後に Bluetooth の利用許可を求められることがあります。許可しないと接続できません。
-- ホストが共有を再開した直後は、ゲストが接続口を探し直すため、最初の接続に時間がかかることがあります（[共有を再開する](./daily#共有を再開する)）。
+- ホストが共有を再開した直後は、ゲストが接続口を探し直すため、最初の接続に時間がかかることがあります（[講座：共有を再開する](/guide/#restart)）。
 
 ### 確認番号を間違えた・期限が切れた
 
@@ -62,7 +62,7 @@ blugit のメッセージは英語で表示されます。表示されたメッ�
 
 | メッセージ | 意味と対処 |
 |---|---|
-| `host requires a bare repository: git init --bare <path>` | 共有できるのは bare リポジトリだけです。[はじめての共有](./first-share)の手順で作ってください |
+| `host requires a bare repository: git init --bare <path>` | 共有できるのは bare リポジトリだけです。[講座：ホスト①](/guide/#host)の手順で作ってください |
 | `another blugit process holds …` | このPCで、すでに別の `blugit host` が動いています。先にそちらを止めてください |
 | `bind RFCOMM channel; omit --channel for automatic allocation` | `--channel` で指定した番号が使用中です。別の番号にするか、`--channel` を外してください |
 | `Bluetooth is switched off` | Bluetooth がオフになっています（Linux）。オンにしてください |

@@ -7,11 +7,14 @@ hero:
   tagline: 近くのPC同士で、いつもの git clone / push / pull を。
   actions:
     - theme: brand
-      text: Git講座（スライド）
+      text: 第1部 Git講座
       link: /git/
+    - theme: brand
+      text: 第2部 blugit講座
+      link: /guide/
     - theme: alt
-      text: blugitガイドへ
-      link: /guide/why
+      text: インストール
+      link: /guide/install
 
 features:
   - title: ネットワークがなくても
@@ -33,6 +36,7 @@ features:
 | こんな人は | ここから |
 |---|---|
 | Gitを知らない（操作はAIに任せたい） | [第1部 Git講座（スライド）](./git/) |
-| Gitは分かるので、blugit の使い方を知りたい | [第2部 blugitガイド](./guide/why) |
+| Gitは分かるので、blugit の使い方を知りたい | [第2部 blugit講座（スライド）](./guide/) |
+| すぐに試したい | [講座：はじめての共有](./guide/#first-share) |
 | ターミナルを使ったことがない | [ターミナルの基本](./guide/terminal) |
-| すぐに試したい | [はじめての共有](./guide/first-share) |
+| エラーが出た | [困ったとき](./guide/troubleshooting) |
