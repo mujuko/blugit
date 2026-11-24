@@ -1,0 +1,62 @@
+/*
+ * Shared tokens for the guide's figures.
+ * Host is always blue and guest always orange, on every page.
+ * Terminals stay dark in both color modes so annotation colors read the same.
+ */
+:root {
+  --blugit-host: #1d4ed8;
+  --blugit-host-soft: #dbeafe;
+  --blugit-guest: #c2410c;
+  --blugit-guest-soft: #ffedd5;
+
+  --blugit-term-bg: #1b1d23;
+  --blugit-term-bar: #2a2d36;
+  --blugit-term-fg: #e6e8ee;
+  --blugit-term-muted: #9aa1ad;
+  --blugit-term-prompt: #86efac;
+
+  /* Annotation colors: pastel so dark ink and the dark terminal both read well. */
+  --blugit-note-1: #fde047;
+  --blugit-note-2: #5eead4;
+  --blugit-note-3: #f9a8d4;
+  --blugit-note-4: #c4b5fd;
+  --blugit-note-5: #bef264;
+  --blugit-note-ink: #1f2328;
+
+  /* Commit graph lanes (main, second branch, third branch); white letters sit on these. */
+  --blugit-lane-0: #4f46e5;
+  --blugit-lane-1: #0f766e;
+  --blugit-lane-2: #be185d;
+
+  --blugit-ok: #15803d;
+  --blugit-ng: #b91c1c;
+}
+
+.dark {
+  --blugit-host: #93c5fd;
+  --blugit-host-soft: rgba(59, 130, 246, 0.18);
+  --blugit-guest: #fdba74;
+  --blugit-guest-soft: rgba(249, 115, 22, 0.18);
+
+  --blugit-term-bg: #111318;
+  --blugit-term-bar: #1f222a;
+
+  --blugit-lane-0: #6366f1;
+  --blugit-lane-1: #0d9488;
+  --blugit-lane-2: #db2777;
+
+  --blugit-ok: #4ade80;
+  --blugit-ng: #f87171;
+}
+
+/* Two screens next to each other when there is room, stacked otherwise. */
+.vp-doc .screens {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.vp-doc .screens > figure {
+  margin: 0;
+}
